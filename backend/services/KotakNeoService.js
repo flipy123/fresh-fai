@@ -24,7 +24,6 @@ export class KotakNeoService extends EventEmitter {
 
   async initialize() {
     try {
-      // Check if required environment variables are present
       if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD) {
         console.log('⚠️ Kotak Neo credentials not configured. Please update your .env file with valid credentials.');
         console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD');
@@ -49,7 +48,7 @@ export class KotakNeoService extends EventEmitter {
 
   async login() {
     try {
-      // Step 1: Login with credentials using correct endpoint
+      // Step 1: Login with credentials
       const loginPayload = {
         consumerKey: this.consumerKey,
         ip: '127.0.0.1',
