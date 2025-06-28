@@ -49,8 +49,8 @@ export class GPTService {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(`OpenAI API Error (${response.status}): ${errorData.error?.message || 'Unknown error'}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`OpenAI API Error (${response.status}): ${errorData.error?.message || response.statusText}`);
       }
 
       const data = await response.json();
@@ -82,7 +82,7 @@ export class GPTService {
           'X-Title': 'FAi-3.0 Trading System'
         },
         body: JSON.stringify({
-          model: 'openai/gpt-4o',
+          model: process.env.GPT_MODEL || 'openai/gpt-4o',
           messages: messages,
           temperature: 0.3,
           max_tokens: 500
@@ -90,8 +90,8 @@ export class GPTService {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(`OpenRouter API Error (${response.status}): ${errorData.error?.message || 'Unknown error'}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`OpenRouter API Error (${response.status}): ${errorData.error?.message || response.statusText}`);
       }
 
       const data = await response.json();

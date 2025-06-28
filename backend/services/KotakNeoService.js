@@ -18,19 +18,21 @@ export class KotakNeoService extends EventEmitter {
     this.userId = null;
     this.mobileNumber = null;
     this.password = null;
+    this.mpin = null;
     this.consumerKey = null;
     this.consumerSecret = null;
     this.totpSecret = null;
     this.ucc = null;
     this.viewToken = null;
     this.tradeToken = null;
+    this.isLoggedIn = false;
   }
 
   async initialize() {
     try {
-      if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD) {
+      if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD || !process.env.KOTAK_MPIN) {
         console.log('⚠️ Kotak Neo credentials not configured. Please update your .env file with valid credentials.');
-        console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD');
+        console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD, KOTAK_MPIN');
         return;
       }
 
@@ -38,6 +40,7 @@ export class KotakNeoService extends EventEmitter {
       this.consumerSecret = process.env.KOTAK_CONSUMER_SECRET;
       this.mobileNumber = process.env.KOTAK_MOBILE_NUMBER;
       this.password = process.env.KOTAK_PASSWORD;
+      this.mpin = process.env.KOTAK_MPIN;
       this.totpSecret = process.env.KOTAK_TOTP_SECRET;
 
       await this.login();
@@ -52,8 +55,8 @@ export class KotakNeoService extends EventEmitter {
 
   async login() {
     try {
-      // Step 1: Initial Login
-      console.log('🔐 Attempting Kotak Neo login...');
+      // Step 1: Initial Login with mobile and password
+      console.log('🔐 Step 1: Attempting Kotak Neo login...');
       
       const loginPayload = {
         mobileNumber: this.mobileNumber,
@@ -64,7 +67,8 @@ export class KotakNeoService extends EventEmitter {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey
+          'consumerKey': this.consumerKey,
+          'accept': '*/*'
         },
         body: JSON.stringify(loginPayload)
       });
@@ -73,29 +77,36 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 Login response status:', loginResponse.status);
       console.log('📋 Login response:', JSON.stringify(loginData, null, 2));
 
-      if (!loginData.Success && !loginData.success && loginData.fault) {
-        throw new Error(`Login failed: ${loginData.fault.message || 'Authentication failed'}`);
+      if (loginData.fault) {
+        throw new Error(`Login failed: ${loginData.fault.message || loginData.fault.description || 'Authentication failed'}`);
+      }
+
+      if (!loginData.data) {
+        throw new Error('Login failed: No data in response');
       }
 
       // Extract session details
-      this.userId = loginData.data?.userId || loginData.userId;
-      this.ucc = loginData.data?.ucc;
-      this.sid = loginData.data?.sid;
-      this.rid = loginData.data?.rid;
+      this.userId = loginData.data.userId;
+      this.ucc = loginData.data.ucc;
+      this.sid = loginData.data.sid;
+      this.rid = loginData.data.rid;
 
       if (!this.userId) {
         throw new Error('User ID not found in login response');
       }
 
+      console.log(`✅ Login successful. User ID: ${this.userId}, UCC: ${this.ucc}`);
+
       // Step 2: Generate View Token (for market data)
-      console.log('🔑 Generating View token...');
+      console.log('🔑 Step 2: Generating View token...');
       await this.generateViewToken();
 
-      // Step 3: Generate Trade Token (for order placement)
-      console.log('🔑 Generating Trade token...');
+      // Step 3: Generate Trade Token (for order placement) - requires MPIN
+      console.log('🔑 Step 3: Generating Trade token with MPIN...');
       await this.generateTradeToken();
 
-      console.log('✅ Kotak Neo authentication successful');
+      this.isLoggedIn = true;
+      console.log('✅ Kotak Neo authentication completed successfully');
       return true;
     } catch (error) {
       console.error('❌ Kotak Neo login failed:', error);
@@ -116,20 +127,28 @@ export class KotakNeoService extends EventEmitter {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey
+          'consumerKey': this.consumerKey,
+          'accept': '*/*'
         },
         body: JSON.stringify(viewTokenPayload)
       });
 
       const viewTokenData = await viewTokenResponse.json();
+      console.log('📋 View token response status:', viewTokenResponse.status);
       console.log('📋 View token response:', JSON.stringify(viewTokenData, null, 2));
 
-      if (viewTokenData.Success || viewTokenData.success) {
-        this.viewToken = viewTokenData.data?.token;
+      if (viewTokenData.fault) {
+        throw new Error(`View token generation failed: ${viewTokenData.fault.message || viewTokenData.fault.description}`);
+      }
+
+      if (viewTokenData.data && viewTokenData.data.token) {
+        this.viewToken = viewTokenData.data.token;
         this.accessToken = this.viewToken; // Use view token as default
+        this.sid = viewTokenData.data.sid || this.sid;
+        this.rid = viewTokenData.data.rid || this.rid;
         console.log('✅ View token generated successfully');
       } else {
-        throw new Error(`View token generation failed: ${viewTokenData.fault?.message || 'Unknown error'}`);
+        throw new Error('View token not found in response');
       }
     } catch (error) {
       console.error('❌ View token generation failed:', error);
@@ -139,43 +158,61 @@ export class KotakNeoService extends EventEmitter {
 
   async generateTradeToken() {
     try {
+      if (!this.mpin) {
+        console.log('⚠️ MPIN not configured, skipping trade token generation');
+        return;
+      }
+
       const otp = this.generateTOTP();
       
       const tradeTokenPayload = {
         userId: this.userId,
-        otp: otp
+        otp: otp,
+        mpin: this.mpin
       };
 
       const tradeTokenResponse = await fetch(`${this.baseUrl}/session/1.0/session/2FA/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey
+          'consumerKey': this.consumerKey,
+          'accept': '*/*'
         },
         body: JSON.stringify(tradeTokenPayload)
       });
 
       const tradeTokenData = await tradeTokenResponse.json();
+      console.log('📋 Trade token response status:', tradeTokenResponse.status);
       console.log('📋 Trade token response:', JSON.stringify(tradeTokenData, null, 2));
 
-      if (tradeTokenData.Success || tradeTokenData.success) {
-        this.tradeToken = tradeTokenData.data?.token;
-        this.hsServerId = tradeTokenData.data?.hsServerId || '';
+      if (tradeTokenData.fault) {
+        console.log(`⚠️ Trade token generation failed: ${tradeTokenData.fault.message || tradeTokenData.fault.description}`);
+        console.log('⚠️ Continuing with view token only (market data will work, but trading will be disabled)');
+        return;
+      }
+
+      if (tradeTokenData.data && tradeTokenData.data.token) {
+        this.tradeToken = tradeTokenData.data.token;
+        this.hsServerId = tradeTokenData.data.hsServerId || '';
+        this.sid = tradeTokenData.data.sid || this.sid;
+        this.rid = tradeTokenData.data.rid || this.rid;
         console.log('✅ Trade token generated successfully');
       } else {
-        console.log('⚠️ Trade token generation failed, continuing with view token only');
+        console.log('⚠️ Trade token not found in response, continuing with view token only');
       }
     } catch (error) {
       console.error('❌ Trade token generation failed:', error);
-      // Don't throw error, continue with view token only
+      console.log('⚠️ Continuing with view token only');
     }
   }
 
   generateTOTP() {
     try {
       if (!this.totpSecret) {
-        console.log('⚠️ TOTP secret not configured, using placeholder');
-        return '123456';
+        console.log('⚠️ TOTP secret not configured, using timestamp-based OTP');
+        // Generate a simple time-based OTP as fallback
+        const timestamp = Math.floor(Date.now() / 1000 / 30);
+        return (timestamp % 1000000).toString().padStart(6, '0');
       }
 
       const token = authenticator.generate(this.totpSecret);
@@ -183,7 +220,9 @@ export class KotakNeoService extends EventEmitter {
       return token;
     } catch (error) {
       console.error('❌ TOTP generation failed:', error);
-      return '123456';
+      // Fallback OTP
+      const timestamp = Math.floor(Date.now() / 1000 / 30);
+      return (timestamp % 1000000).toString().padStart(6, '0');
     }
   }
 
@@ -196,47 +235,74 @@ export class KotakNeoService extends EventEmitter {
         headers: this.getAuthHeaders()
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
       const data = await response.json();
       console.log('📋 Master data paths response status:', response.status);
       
-      if (data.data && data.data.filesPaths) {
+      if (data.fault) {
+        throw new Error(`Master data API error: ${data.fault.message || data.fault.description}`);
+      }
+      
+      if (data.data && data.data.filesPaths && Array.isArray(data.data.filesPaths)) {
+        console.log(`📊 Found ${data.data.filesPaths.length} master data files`);
+        
         // Download NSE CM data for indices
         const nseCmPath = data.data.filesPaths.find(path => path.includes('nse_cm-v1.csv'));
         if (nseCmPath) {
+          console.log('📥 Downloading NSE CM data...');
           await this.downloadAndParseMasterFile(nseCmPath);
         }
         
         // Download NSE FO data for options
         const nseFoPath = data.data.filesPaths.find(path => path.includes('nse_fo.csv'));
         if (nseFoPath) {
+          console.log('📥 Downloading NSE FO data...');
           await this.downloadAndParseMasterFile(nseFoPath);
         }
         
-        console.log(`✅ Master data downloaded successfully`);
+        console.log(`✅ Master data downloaded successfully. Total instruments: ${this.masterData?.length || 0}`);
       } else {
-        console.log('⚠️ Failed to get master data file paths:', data.fault?.message || 'Unknown error');
+        console.log('⚠️ No master data file paths found in response');
       }
     } catch (error) {
       console.error('❌ Failed to download master data:', error);
+      // Initialize empty master data to prevent crashes
+      this.masterData = [];
     }
   }
 
   async downloadAndParseMasterFile(fileUrl) {
     try {
+      console.log(`📥 Downloading: ${fileUrl}`);
       const response = await fetch(fileUrl);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
       const csvData = await response.text();
       
-      // Parse CSV data (simplified parsing)
-      const lines = csvData.split('\n');
-      const headers = lines[0].split(',');
+      // Parse CSV data
+      const lines = csvData.split('\n').filter(line => line.trim());
+      if (lines.length === 0) {
+        console.log('⚠️ Empty CSV file');
+        return;
+      }
+      
+      const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+      console.log('📋 CSV Headers:', headers);
       
       const instruments = [];
       for (let i = 1; i < lines.length; i++) {
         if (lines[i].trim()) {
-          const values = lines[i].split(',');
+          const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
           const instrument = {};
+          
           headers.forEach((header, index) => {
-            instrument[header.trim()] = values[index]?.trim() || '';
+            instrument[header] = values[index] || '';
           });
           
           // Filter for relevant instruments
@@ -245,8 +311,20 @@ export class KotakNeoService extends EventEmitter {
             instrument.pSymbolName.includes('BANKNIFTY') ||
             instrument.pSymbolName.includes('FINNIFTY') ||
             instrument.pSymbolName.includes('MIDCPNIFTY') ||
-            instrument.pInstrumentName === 'INDEX'
+            instrument.pInstrumentName === 'INDEX' ||
+            instrument.pInstrumentName === 'OPTIDX'
           )) {
+            // Calculate proper strike price for options
+            if (instrument.dStrikePrice) {
+              instrument.strikePrice = parseFloat(instrument.dStrikePrice) / 100;
+            }
+            
+            // Convert expiry date for NSE FO
+            if (instrument.lExpiryDate && fileUrl.includes('nse_fo')) {
+              const epochTime = parseInt(instrument.lExpiryDate) + 315513000;
+              instrument.expiryDate = new Date(epochTime * 1000);
+            }
+            
             instruments.push(instrument);
           }
         }
@@ -257,15 +335,15 @@ export class KotakNeoService extends EventEmitter {
       }
       this.masterData = this.masterData.concat(instruments);
       
-      console.log(`📊 Parsed ${instruments.length} instruments from ${fileUrl}`);
+      console.log(`📊 Parsed ${instruments.length} relevant instruments from ${fileUrl}`);
     } catch (error) {
       console.error('❌ Failed to download/parse master file:', error);
     }
   }
 
   connectWebSocket() {
-    if (!this.sid || !this.hsServerId) {
-      console.log('⚠️ Cannot connect WebSocket: Missing SID or hsServerId');
+    if (!this.sid) {
+      console.log('⚠️ Cannot connect WebSocket: Missing SID');
       return;
     }
 
@@ -273,7 +351,8 @@ export class KotakNeoService extends EventEmitter {
       this.websocket.close();
     }
 
-    const wsUrl = `${this.wsUrl}/?sid=${this.sid}&hsServerId=${this.hsServerId}`;
+    // Use the correct WebSocket URL format
+    const wsUrl = `${this.wsUrl}/?sid=${this.sid}${this.hsServerId ? `&hsServerId=${this.hsServerId}` : ''}`;
     console.log('🔌 Connecting to WebSocket:', wsUrl);
 
     this.websocket = new WebSocket(wsUrl);
@@ -281,6 +360,9 @@ export class KotakNeoService extends EventEmitter {
     this.websocket.on('open', () => {
       console.log('✅ WebSocket connected to Kotak Neo');
       this.emit('websocket_connected');
+      
+      // Subscribe to default indices
+      this.subscribeToDefaultIndices();
     });
 
     this.websocket.on('message', (data) => {
@@ -292,8 +374,8 @@ export class KotakNeoService extends EventEmitter {
       }
     });
 
-    this.websocket.on('close', () => {
-      console.log('⚠️ WebSocket disconnected from Kotak Neo');
+    this.websocket.on('close', (code, reason) => {
+      console.log(`⚠️ WebSocket disconnected from Kotak Neo. Code: ${code}, Reason: ${reason}`);
       setTimeout(() => this.connectWebSocket(), 5000);
     });
 
@@ -302,41 +384,62 @@ export class KotakNeoService extends EventEmitter {
     });
   }
 
+  subscribeToDefaultIndices() {
+    try {
+      const defaultTokens = ['Nifty 50', 'Nifty Bank', 'Nifty Fin Service', 'NIFTY MIDCAP 100'];
+      this.subscribeToTokens(defaultTokens);
+    } catch (error) {
+      console.error('❌ Failed to subscribe to default indices:', error);
+    }
+  }
+
   handleWebSocketMessage(message) {
-    if (message.type === 'mf' || message.type === 'sf') {
-      this.emit('market_data', {
-        token: message.tk,
-        ltp: message.lp,
-        change: message.c,
-        changePercent: message.cp,
-        volume: message.v,
-        timestamp: message.ft,
-        high: message.h,
-        low: message.l,
-        open: message.o,
-        close: message.pc
-      });
+    try {
+      if (message.type === 'mf' || message.type === 'sf') {
+        this.emit('market_data', {
+          token: message.tk,
+          ltp: parseFloat(message.lp) || 0,
+          change: parseFloat(message.c) || 0,
+          changePercent: parseFloat(message.cp) || 0,
+          volume: parseInt(message.v) || 0,
+          timestamp: message.ft,
+          high: parseFloat(message.h) || 0,
+          low: parseFloat(message.l) || 0,
+          open: parseFloat(message.o) || 0,
+          close: parseFloat(message.pc) || 0
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error handling WebSocket message:', error);
     }
   }
 
   async subscribeToTokens(tokens) {
     if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected');
+      console.log('⚠️ WebSocket not connected, cannot subscribe to tokens');
+      return;
     }
 
     const newTokens = tokens.filter(token => !this.subscribedTokens.has(token));
-    if (newTokens.length === 0) return;
+    if (newTokens.length === 0) {
+      console.log('📡 All tokens already subscribed');
+      return;
+    }
 
-    const subscribeMessage = {
-      a: 'subscribe',
-      v: newTokens,
-      m: 'mf'
-    };
+    try {
+      const subscribeMessage = {
+        a: 'subscribe',
+        v: newTokens,
+        m: 'mf'
+      };
 
-    this.websocket.send(JSON.stringify(subscribeMessage));
-    newTokens.forEach(token => this.subscribedTokens.add(token));
-    
-    console.log(`📡 Subscribed to ${newTokens.length} tokens`);
+      this.websocket.send(JSON.stringify(subscribeMessage));
+      newTokens.forEach(token => this.subscribedTokens.add(token));
+      
+      console.log(`📡 Subscribed to ${newTokens.length} tokens:`, newTokens);
+    } catch (error) {
+      console.error('❌ Failed to subscribe to tokens:', error);
+    }
   }
 
   async getOptionChain(symbol, expiryDate) {
@@ -356,7 +459,12 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.data || data.Result) : null;
+      
+      if (data.fault) {
+        throw new Error(`Option chain API error: ${data.fault.message || data.fault.description}`);
+      }
+      
+      return data.data || null;
     } catch (error) {
       console.error('❌ Failed to get option chain:', error);
       return null;
@@ -371,7 +479,13 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.data || data.Result || []) : [];
+      
+      if (data.fault) {
+        console.error('❌ Positions API error:', data.fault.message || data.fault.description);
+        return [];
+      }
+      
+      return data.data || [];
     } catch (error) {
       console.error('❌ Failed to get positions:', error);
       return [];
@@ -386,7 +500,13 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.data || data.Result || []) : [];
+      
+      if (data.fault) {
+        console.error('❌ Orders API error:', data.fault.message || data.fault.description);
+        return [];
+      }
+      
+      return data.data || [];
     } catch (error) {
       console.error('❌ Failed to get orders:', error);
       return [];
@@ -395,6 +515,10 @@ export class KotakNeoService extends EventEmitter {
 
   async placeOrder(orderDetails) {
     try {
+      if (!this.tradeToken) {
+        throw new Error('Trade token not available. Cannot place orders without MPIN authentication.');
+      }
+
       // Use trade token for order placement
       const headers = this.getAuthHeaders(true);
       
@@ -406,14 +530,16 @@ export class KotakNeoService extends EventEmitter {
         mp: orderDetails.mp || "0",
         pc: orderDetails.pc || "CNC",
         pf: orderDetails.pf || "N",
-        pr: orderDetails.pr || orderDetails.price,
+        pr: orderDetails.pr || orderDetails.price?.toString(),
         pt: orderDetails.pt || "L",
-        qt: orderDetails.qt || orderDetails.quantity,
+        qt: orderDetails.qt || orderDetails.quantity?.toString(),
         rt: orderDetails.rt || "DAY",
         tp: orderDetails.tp || "0",
         ts: orderDetails.ts || orderDetails.instrumentToken,
         tt: orderDetails.tt || orderDetails.transactionType
       };
+
+      console.log('📤 Placing order:', JSON.stringify(kotakOrder, null, 2));
 
       const response = await fetch(`${this.baseUrl}/Orders/2.0/quick/order/rule/ms/place`, {
         method: 'POST',
@@ -422,6 +548,12 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
+      
+      if (data.fault) {
+        throw new Error(`Order placement failed: ${data.fault.message || data.fault.description}`);
+      }
+      
+      console.log('✅ Order placed successfully:', data);
       return data;
     } catch (error) {
       console.error('❌ Failed to place order:', error);
@@ -437,7 +569,13 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.data || data.Result) : null;
+      
+      if (data.fault) {
+        console.error('❌ Margins API error:', data.fault.message || data.fault.description);
+        return null;
+      }
+      
+      return data.data || null;
     } catch (error) {
       console.error('❌ Failed to get margins:', error);
       return null;
@@ -452,7 +590,13 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.data || data.Result) : null;
+      
+      if (data.fault) {
+        console.error('❌ Limits API error:', data.fault.message || data.fault.description);
+        return null;
+      }
+      
+      return data.data || null;
     } catch (error) {
       console.error('❌ Failed to get limits:', error);
       return null;
@@ -480,9 +624,7 @@ export class KotakNeoService extends EventEmitter {
   }
 
   getInstrumentToken(symbol) {
-    if (!this.masterData) return null;
-    
-    // For indices, use predefined tokens
+    // For indices, use predefined tokens as per documentation
     const indexTokens = {
       'NIFTY': 'Nifty 50',
       'BANKNIFTY': 'Nifty Bank',
@@ -494,11 +636,14 @@ export class KotakNeoService extends EventEmitter {
       return indexTokens[symbol];
     }
     
+    if (!this.masterData) return null;
+    
     const instrument = this.masterData.find(item => 
       item.pSymbolName === symbol || 
       item.pDisplaySymbol === symbol ||
       item.pTrdSymbol === symbol
     );
+    
     return instrument ? (instrument.pToken || instrument.pTrdSymbol) : null;
   }
 
@@ -525,7 +670,11 @@ export class KotakNeoService extends EventEmitter {
   }
 
   isAuthenticated() {
-    return !!(this.accessToken || this.viewToken);
+    return this.isLoggedIn && !!(this.accessToken || this.viewToken);
+  }
+
+  canTrade() {
+    return this.isAuthenticated() && !!this.tradeToken;
   }
 
   getInstrumentDetails(token) {
