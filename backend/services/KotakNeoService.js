@@ -60,7 +60,7 @@ export class KotakNeoService extends EventEmitter {
 
       console.log('🔐 Attempting Kotak Neo login...');
       
-      const loginResponse = await fetch(`${this.baseUrl}/login`, {
+      const loginResponse = await fetch(`${this.baseUrl}/auth/login`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -113,7 +113,7 @@ export class KotakNeoService extends EventEmitter {
         consumerKey: this.consumerKey
       };
 
-      const sessionResponse = await fetch(`${this.baseUrl}/session/2FA/validate`, {
+      const sessionResponse = await fetch(`${this.baseUrl}/auth/session/2FA/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
