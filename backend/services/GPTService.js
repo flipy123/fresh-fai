@@ -4,7 +4,7 @@ export class GPTService {
   constructor() {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openrouterApiKey = process.env.OPENROUTER_API_KEY;
-    this.tradeMemory = new Map(); // Store per-index trade history
+    this.tradeMemory = new Map();
   }
 
   async sendToGPT(marketData, provider = 'openai') {
@@ -18,7 +18,6 @@ export class GPTService {
         response = await this.callOpenAI(messages);
       }
 
-      // Parse GPT response and update trade memory
       const decision = this.parseGPTResponse(response);
       this.updateTradeMemory(marketData.index, decision);
       
@@ -34,29 +33,38 @@ export class GPTService {
       throw new Error('OpenAI API key not configured. Please set OPENAI_API_KEY in your .env file.');
     }
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.openaiApiKey}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-2024-08-06',
-        messages: messages,
-        temperature: 0.3,
-        max_tokens: 500
-      })
-    });
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.openaiApiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages: messages,
+          temperature: 0.3,
+          max_tokens: 500
+        })
+      });
 
-    const data = await response.json();
-    
-    // Check if the response contains the expected structure
-    if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
-      console.error('❌ OpenAI API Error Response:', data);
-      throw new Error(`OpenAI API Error: ${data.error?.message || 'Invalid response format'}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`OpenAI API Error (${response.status}): ${errorData.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+        console.error('❌ OpenAI API Error Response:', data);
+        throw new Error(`OpenAI API Error: ${data.error?.message || 'Invalid response format'}`);
+      }
+      
+      return data.choices[0].message.content;
+    } catch (error) {
+      console.error('❌ OpenAI API call failed:', error);
+      throw error;
     }
-    
-    return data.choices[0].message.content;
   }
 
   async callOpenRouter(messages) {
@@ -64,31 +72,40 @@ export class GPTService {
       throw new Error('OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file.');
     }
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.openrouterApiKey}`,
-        'HTTP-Referer': 'https://localhost:3001',
-        'X-Title': 'FAi-3.0 Trading System'
-      },
-      body: JSON.stringify({
-        model: 'openai/gpt-4o-2024-08-06',
-        messages: messages,
-        temperature: 0.3,
-        max_tokens: 500
-      })
-    });
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.openrouterApiKey}`,
+          'HTTP-Referer': 'https://localhost:3001',
+          'X-Title': 'FAi-3.0 Trading System'
+        },
+        body: JSON.stringify({
+          model: 'openai/gpt-4o',
+          messages: messages,
+          temperature: 0.3,
+          max_tokens: 500
+        })
+      });
 
-    const data = await response.json();
-    
-    // Check if the response contains the expected structure
-    if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
-      console.error('❌ OpenRouter API Error Response:', data);
-      throw new Error(`OpenRouter API Error: ${data.error?.message || 'Invalid response format'}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`OpenRouter API Error (${response.status}): ${errorData.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+        console.error('❌ OpenRouter API Error Response:', data);
+        throw new Error(`OpenRouter API Error: ${data.error?.message || 'Invalid response format'}`);
+      }
+      
+      return data.choices[0].message.content;
+    } catch (error) {
+      console.error('❌ OpenRouter API call failed:', error);
+      throw error;
     }
-    
-    return data.choices[0].message.content;
   }
 
   buildGPTMessages(marketData) {
@@ -137,13 +154,11 @@ Please analyze and provide trading decision.`;
 
   parseGPTResponse(response) {
     try {
-      // Extract JSON from response
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
       
-      // Fallback parsing
       return {
         action: 'HOLD',
         reason: 'Failed to parse GPT response',
@@ -170,7 +185,6 @@ Please analyze and provide trading decision.`;
       decision: decision
     });
     
-    // Keep only last 50 trades per index
     if (history.length > 50) {
       history.shift();
     }
@@ -193,7 +207,6 @@ Please analyze and provide trading decision.`;
 
   async chatWithGPT(message, context, provider = 'openai') {
     try {
-      // Check if API keys are configured
       if (provider === 'openrouter' && !this.openrouterApiKey) {
         return 'OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file to use this provider.';
       }
@@ -220,7 +233,7 @@ Please analyze and provide trading decision.`;
       }
     } catch (error) {
       console.error('❌ Chat GPT error:', error);
-      return 'Sorry, I encountered an error. Please check your API configuration and try again.';
+      return `Sorry, I encountered an error: ${error.message}. Please check your API configuration and try again.`;
     }
   }
 }

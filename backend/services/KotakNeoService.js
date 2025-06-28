@@ -6,7 +6,7 @@ import { authenticator } from 'otplib';
 export class KotakNeoService extends EventEmitter {
   constructor() {
     super();
-    this.baseUrl = 'https://gw-napi.kotaksecurities.com/rest/v1';
+    this.baseUrl = 'https://gw-napi.kotaksecurities.com';
     this.wsUrl = 'wss://mlhsi.kotaksecurities.com';
     this.accessToken = null;
     this.sid = null;
@@ -49,7 +49,7 @@ export class KotakNeoService extends EventEmitter {
 
   async login() {
     try {
-      // Step 1: Login with credentials
+      // Step 1: Login with credentials using correct endpoint
       const loginPayload = {
         consumerKey: this.consumerKey,
         ip: '127.0.0.1',
@@ -60,11 +60,11 @@ export class KotakNeoService extends EventEmitter {
 
       console.log('🔐 Attempting Kotak Neo login...');
       
-      const loginResponse = await fetch(`${this.baseUrl}/auth/login`, {
+      const loginResponse = await fetch(`${this.baseUrl}/login`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.consumerKey}`
+          'consumerKey': this.consumerKey
         },
         body: JSON.stringify(loginPayload)
       });
@@ -78,7 +78,7 @@ export class KotakNeoService extends EventEmitter {
         throw new Error(`Login failed: ${errorMessage}`);
       }
 
-      // Extract user ID from login response - try different possible field names
+      // Extract user ID from login response
       this.userId = loginData.data?.userId || 
                    loginData.userId || 
                    loginData.data?.user_id || 
@@ -88,7 +88,6 @@ export class KotakNeoService extends EventEmitter {
       
       if (!this.userId) {
         console.log('⚠️ User ID not found in login response, trying to proceed without 2FA...');
-        // Some API implementations might not require 2FA for certain accounts
         this.accessToken = loginData.data?.token || loginData.token || loginData.access_token;
         this.sid = loginData.data?.sid || loginData.sid;
         this.hsServerId = loginData.data?.hsServerId || loginData.hsServerId;
@@ -113,11 +112,11 @@ export class KotakNeoService extends EventEmitter {
         consumerKey: this.consumerKey
       };
 
-      const sessionResponse = await fetch(`${this.baseUrl}/auth/session/2FA/validate`, {
+      const sessionResponse = await fetch(`${this.baseUrl}/session/2FA/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.consumerKey}`
+          'consumerKey': this.consumerKey
         },
         body: JSON.stringify(sessionPayload)
       });
@@ -155,13 +154,12 @@ export class KotakNeoService extends EventEmitter {
         return '123456';
       }
 
-      // Use otplib to generate TOTP
       const token = authenticator.generate(this.totpSecret);
       console.log('🔐 Generated TOTP token:', token);
       return token;
     } catch (error) {
       console.error('❌ TOTP generation failed:', error);
-      return '123456'; // Fallback
+      return '123456';
     }
   }
 
@@ -178,7 +176,6 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 Master data response status:', response.status);
       
       if (data.Success || data.success) {
-        // Filter for relevant instruments (NIFTY, BANKNIFTY, etc.)
         this.masterData = (data.Result || data.data || []).filter(item => 
           item.pSymbolName && (
             item.pSymbolName.includes('NIFTY') || 
@@ -227,7 +224,6 @@ export class KotakNeoService extends EventEmitter {
 
     this.websocket.on('close', () => {
       console.log('⚠️ WebSocket disconnected from Kotak Neo');
-      // Reconnect after 5 seconds
       setTimeout(() => this.connectWebSocket(), 5000);
     });
 
@@ -237,9 +233,7 @@ export class KotakNeoService extends EventEmitter {
   }
 
   handleWebSocketMessage(message) {
-    // Handle different message types based on Kotak Neo WebSocket protocol
     if (message.type === 'mf' || message.type === 'sf') {
-      // Market feed or snapshot feed
       this.emit('market_data', {
         token: message.tk,
         ltp: message.lp,
@@ -266,7 +260,7 @@ export class KotakNeoService extends EventEmitter {
     const subscribeMessage = {
       a: 'subscribe',
       v: newTokens,
-      m: 'mf' // Market feed mode
+      m: 'mf'
     };
 
     this.websocket.send(JSON.stringify(subscribeMessage));
@@ -331,7 +325,6 @@ export class KotakNeoService extends EventEmitter {
 
   async placeOrder(orderDetails) {
     try {
-      // Validate required order fields
       const requiredFields = ['instrumentToken', 'transactionType', 'quantity', 'price', 'product', 'validity'];
       for (const field of requiredFields) {
         if (!orderDetails[field]) {
@@ -430,13 +423,11 @@ export class KotakNeoService extends EventEmitter {
     return !!this.accessToken;
   }
 
-  // Utility method to get instrument details
   getInstrumentDetails(token) {
     if (!this.masterData) return null;
     return this.masterData.find(item => item.pToken === token);
   }
 
-  // Method to search instruments
   searchInstruments(query) {
     if (!this.masterData) return [];
     
