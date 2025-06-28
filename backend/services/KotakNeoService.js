@@ -10,6 +10,7 @@ export class KotakNeoService extends EventEmitter {
     this.wsUrl = 'wss://mlhsi.kotaksecurities.com';
     this.accessToken = null;
     this.sid = null;
+    this.rid = null;
     this.hsServerId = null;
     this.websocket = null;
     this.masterData = null;
@@ -20,6 +21,9 @@ export class KotakNeoService extends EventEmitter {
     this.consumerKey = null;
     this.consumerSecret = null;
     this.totpSecret = null;
+    this.ucc = null;
+    this.viewToken = null;
+    this.tradeToken = null;
   }
 
   async initialize() {
@@ -48,18 +52,15 @@ export class KotakNeoService extends EventEmitter {
 
   async login() {
     try {
-      // Step 1: Login with credentials
+      // Step 1: Initial Login
+      console.log('🔐 Attempting Kotak Neo login...');
+      
       const loginPayload = {
-        consumerKey: this.consumerKey,
-        ip: '127.0.0.1',
-        appId: 'FAi30',
         mobileNumber: this.mobileNumber,
         password: this.password
       };
 
-      console.log('🔐 Attempting Kotak Neo login...');
-      
-      const loginResponse = await fetch(`${this.baseUrl}/login`, {
+      const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -72,77 +73,101 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 Login response status:', loginResponse.status);
       console.log('📋 Login response:', JSON.stringify(loginData, null, 2));
 
-      if (!loginData.Success && !loginData.success) {
-        const errorMessage = loginData.Message || loginData.message || loginData.error || 'Login failed - no specific error message provided by API';
-        throw new Error(`Login failed: ${errorMessage}`);
+      if (!loginData.Success && !loginData.success && loginData.fault) {
+        throw new Error(`Login failed: ${loginData.fault.message || 'Authentication failed'}`);
       }
 
-      // Extract user ID from login response
-      this.userId = loginData.data?.userId || 
-                   loginData.userId || 
-                   loginData.data?.user_id || 
-                   loginData.user_id ||
-                   loginData.data?.id ||
-                   loginData.id;
-      
+      // Extract session details
+      this.userId = loginData.data?.userId || loginData.userId;
+      this.ucc = loginData.data?.ucc;
+      this.sid = loginData.data?.sid;
+      this.rid = loginData.data?.rid;
+
       if (!this.userId) {
-        console.log('⚠️ User ID not found in login response, trying to proceed without 2FA...');
-        this.accessToken = loginData.data?.token || loginData.token || loginData.access_token;
-        this.sid = loginData.data?.sid || loginData.sid;
-        this.hsServerId = loginData.data?.hsServerId || loginData.hsServerId;
-        
-        if (this.accessToken) {
-          console.log('✅ Kotak Neo authentication successful (without 2FA)');
-          return true;
-        }
-        
-        throw new Error('User ID not found in login response and no direct token provided');
+        throw new Error('User ID not found in login response');
       }
 
-      // Step 2: Generate OTP and validate session
-      console.log('🔑 Generating session token with 2FA...');
-      
-      const otp = this.generateTOTP();
-      console.log('🔐 Generated OTP:', otp);
-      
-      const sessionPayload = {
-        userId: this.userId,
-        otp: otp,
-        consumerKey: this.consumerKey
-      };
+      // Step 2: Generate View Token (for market data)
+      console.log('🔑 Generating View token...');
+      await this.generateViewToken();
 
-      const sessionResponse = await fetch(`${this.baseUrl}/session/2FA/validate`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey
-        },
-        body: JSON.stringify(sessionPayload)
-      });
-
-      const sessionData = await sessionResponse.json();
-      console.log('📋 Session response status:', sessionResponse.status);
-      console.log('📋 Session response:', JSON.stringify(sessionData, null, 2));
-
-      if (!sessionData.Success && !sessionData.success) {
-        const errorMessage = sessionData.Message || sessionData.message || sessionData.error || 'Session generation failed - no specific error message provided by API';
-        throw new Error(`Session generation failed: ${errorMessage}`);
-      }
-
-      // Extract tokens from session response
-      this.accessToken = sessionData.data?.token || sessionData.token || sessionData.access_token;
-      this.sid = sessionData.data?.sid || sessionData.sid;
-      this.hsServerId = sessionData.data?.hsServerId || sessionData.hsServerId;
-
-      if (!this.accessToken) {
-        throw new Error('Access token not found in session response');
-      }
+      // Step 3: Generate Trade Token (for order placement)
+      console.log('🔑 Generating Trade token...');
+      await this.generateTradeToken();
 
       console.log('✅ Kotak Neo authentication successful');
       return true;
     } catch (error) {
       console.error('❌ Kotak Neo login failed:', error);
       throw error;
+    }
+  }
+
+  async generateViewToken() {
+    try {
+      const otp = this.generateTOTP();
+      
+      const viewTokenPayload = {
+        userId: this.userId,
+        otp: otp
+      };
+
+      const viewTokenResponse = await fetch(`${this.baseUrl}/session/1.0/session/validate`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'consumerKey': this.consumerKey
+        },
+        body: JSON.stringify(viewTokenPayload)
+      });
+
+      const viewTokenData = await viewTokenResponse.json();
+      console.log('📋 View token response:', JSON.stringify(viewTokenData, null, 2));
+
+      if (viewTokenData.Success || viewTokenData.success) {
+        this.viewToken = viewTokenData.data?.token;
+        this.accessToken = this.viewToken; // Use view token as default
+        console.log('✅ View token generated successfully');
+      } else {
+        throw new Error(`View token generation failed: ${viewTokenData.fault?.message || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('❌ View token generation failed:', error);
+      throw error;
+    }
+  }
+
+  async generateTradeToken() {
+    try {
+      const otp = this.generateTOTP();
+      
+      const tradeTokenPayload = {
+        userId: this.userId,
+        otp: otp
+      };
+
+      const tradeTokenResponse = await fetch(`${this.baseUrl}/session/1.0/session/2FA/validate`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'consumerKey': this.consumerKey
+        },
+        body: JSON.stringify(tradeTokenPayload)
+      });
+
+      const tradeTokenData = await tradeTokenResponse.json();
+      console.log('📋 Trade token response:', JSON.stringify(tradeTokenData, null, 2));
+
+      if (tradeTokenData.Success || tradeTokenData.success) {
+        this.tradeToken = tradeTokenData.data?.token;
+        this.hsServerId = tradeTokenData.data?.hsServerId || '';
+        console.log('✅ Trade token generated successfully');
+      } else {
+        console.log('⚠️ Trade token generation failed, continuing with view token only');
+      }
+    } catch (error) {
+      console.error('❌ Trade token generation failed:', error);
+      // Don't throw error, continue with view token only
     }
   }
 
@@ -164,31 +189,77 @@ export class KotakNeoService extends EventEmitter {
 
   async downloadMasterData() {
     try {
-      console.log('📊 Downloading master data...');
+      console.log('📊 Downloading master data file paths...');
       
-      const response = await fetch(`${this.baseUrl}/InstrumentMaster`, {
+      const response = await fetch(`${this.baseUrl}/Files/1.0/masterscrip/v2/file-paths`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
 
       const data = await response.json();
-      console.log('📋 Master data response status:', response.status);
+      console.log('📋 Master data paths response status:', response.status);
       
-      if (data.Success || data.success) {
-        this.masterData = (data.Result || data.data || []).filter(item => 
-          item.pSymbolName && (
-            item.pSymbolName.includes('NIFTY') || 
-            item.pSymbolName.includes('BANKNIFTY') ||
-            item.pSymbolName.includes('FINNIFTY') ||
-            item.pSymbolName.includes('MIDCPNIFTY')
-          )
-        );
-        console.log(`✅ Master data downloaded: ${this.masterData.length} instruments`);
+      if (data.data && data.data.filesPaths) {
+        // Download NSE CM data for indices
+        const nseCmPath = data.data.filesPaths.find(path => path.includes('nse_cm-v1.csv'));
+        if (nseCmPath) {
+          await this.downloadAndParseMasterFile(nseCmPath);
+        }
+        
+        // Download NSE FO data for options
+        const nseFoPath = data.data.filesPaths.find(path => path.includes('nse_fo.csv'));
+        if (nseFoPath) {
+          await this.downloadAndParseMasterFile(nseFoPath);
+        }
+        
+        console.log(`✅ Master data downloaded successfully`);
       } else {
-        console.log('⚠️ Failed to download master data:', data.Message || data.message || 'Unknown error');
+        console.log('⚠️ Failed to get master data file paths:', data.fault?.message || 'Unknown error');
       }
     } catch (error) {
       console.error('❌ Failed to download master data:', error);
+    }
+  }
+
+  async downloadAndParseMasterFile(fileUrl) {
+    try {
+      const response = await fetch(fileUrl);
+      const csvData = await response.text();
+      
+      // Parse CSV data (simplified parsing)
+      const lines = csvData.split('\n');
+      const headers = lines[0].split(',');
+      
+      const instruments = [];
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].trim()) {
+          const values = lines[i].split(',');
+          const instrument = {};
+          headers.forEach((header, index) => {
+            instrument[header.trim()] = values[index]?.trim() || '';
+          });
+          
+          // Filter for relevant instruments
+          if (instrument.pSymbolName && (
+            instrument.pSymbolName.includes('NIFTY') || 
+            instrument.pSymbolName.includes('BANKNIFTY') ||
+            instrument.pSymbolName.includes('FINNIFTY') ||
+            instrument.pSymbolName.includes('MIDCPNIFTY') ||
+            instrument.pInstrumentName === 'INDEX'
+          )) {
+            instruments.push(instrument);
+          }
+        }
+      }
+      
+      if (!this.masterData) {
+        this.masterData = [];
+      }
+      this.masterData = this.masterData.concat(instruments);
+      
+      console.log(`📊 Parsed ${instruments.length} instruments from ${fileUrl}`);
+    } catch (error) {
+      console.error('❌ Failed to download/parse master file:', error);
     }
   }
 
@@ -275,7 +346,7 @@ export class KotakNeoService extends EventEmitter {
         throw new Error(`Instrument token not found for symbol: ${symbol}`);
       }
 
-      const response = await fetch(`${this.baseUrl}/optionchain`, {
+      const response = await fetch(`${this.baseUrl}/optionchain/1.0/optionchain/optionchain`, {
         method: 'POST',
         headers: this.getAuthHeaders(),
         body: JSON.stringify({
@@ -285,7 +356,7 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.Result || data.data) : null;
+      return (data.Success || data.success) ? (data.data || data.Result) : null;
     } catch (error) {
       console.error('❌ Failed to get option chain:', error);
       return null;
@@ -294,13 +365,13 @@ export class KotakNeoService extends EventEmitter {
 
   async getPositions() {
     try {
-      const response = await fetch(`${this.baseUrl}/positions`, {
+      const response = await fetch(`${this.baseUrl}/Positions/2.0/positions/todays`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.Result || data.data || []) : [];
+      return (data.Success || data.success) ? (data.data || data.Result || []) : [];
     } catch (error) {
       console.error('❌ Failed to get positions:', error);
       return [];
@@ -309,13 +380,13 @@ export class KotakNeoService extends EventEmitter {
 
   async getOrders() {
     try {
-      const response = await fetch(`${this.baseUrl}/orders`, {
+      const response = await fetch(`${this.baseUrl}/Orders/2.0/quick/user/orders`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.Result || data.data || []) : [];
+      return (data.Success || data.success) ? (data.data || data.Result || []) : [];
     } catch (error) {
       console.error('❌ Failed to get orders:', error);
       return [];
@@ -324,17 +395,30 @@ export class KotakNeoService extends EventEmitter {
 
   async placeOrder(orderDetails) {
     try {
-      const requiredFields = ['instrumentToken', 'transactionType', 'quantity', 'price', 'product', 'validity'];
-      for (const field of requiredFields) {
-        if (!orderDetails[field]) {
-          throw new Error(`Missing required field: ${field}`);
-        }
-      }
+      // Use trade token for order placement
+      const headers = this.getAuthHeaders(true);
+      
+      // Map order details to Kotak Neo format
+      const kotakOrder = {
+        am: orderDetails.am || "NO",
+        dq: orderDetails.dq || "0",
+        es: orderDetails.es || "nse_cm",
+        mp: orderDetails.mp || "0",
+        pc: orderDetails.pc || "CNC",
+        pf: orderDetails.pf || "N",
+        pr: orderDetails.pr || orderDetails.price,
+        pt: orderDetails.pt || "L",
+        qt: orderDetails.qt || orderDetails.quantity,
+        rt: orderDetails.rt || "DAY",
+        tp: orderDetails.tp || "0",
+        ts: orderDetails.ts || orderDetails.instrumentToken,
+        tt: orderDetails.tt || orderDetails.transactionType
+      };
 
-      const response = await fetch(`${this.baseUrl}/orders/regular`, {
+      const response = await fetch(`${this.baseUrl}/Orders/2.0/quick/order/rule/ms/place`, {
         method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify(orderDetails)
+        headers: headers,
+        body: JSON.stringify(kotakOrder)
       });
 
       const data = await response.json();
@@ -347,13 +431,13 @@ export class KotakNeoService extends EventEmitter {
 
   async getMargins() {
     try {
-      const response = await fetch(`${this.baseUrl}/margins`, {
+      const response = await fetch(`${this.baseUrl}/Margins/2.0/margins/equity`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.Result || data.data) : null;
+      return (data.Success || data.success) ? (data.data || data.Result) : null;
     } catch (error) {
       console.error('❌ Failed to get margins:', error);
       return null;
@@ -362,30 +446,30 @@ export class KotakNeoService extends EventEmitter {
 
   async getLimits() {
     try {
-      const response = await fetch(`${this.baseUrl}/limits`, {
+      const response = await fetch(`${this.baseUrl}/Limits/1.0/limits/rms-limits`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
 
       const data = await response.json();
-      return (data.Success || data.success) ? (data.Result || data.data) : null;
+      return (data.Success || data.success) ? (data.data || data.Result) : null;
     } catch (error) {
       console.error('❌ Failed to get limits:', error);
       return null;
     }
   }
 
-  getAuthHeaders() {
+  getAuthHeaders(useTradeToken = false) {
     const headers = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'accept': '*/*'
     };
 
-    if (this.accessToken) {
-      headers['Authorization'] = `Bearer ${this.accessToken}`;
-    }
+    // Use trade token for trading operations, view token for market data
+    const token = useTradeToken && this.tradeToken ? this.tradeToken : this.accessToken;
     
-    if (this.sid) {
-      headers['sid'] = this.sid;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
     }
     
     if (this.consumerKey) {
@@ -397,34 +481,59 @@ export class KotakNeoService extends EventEmitter {
 
   getInstrumentToken(symbol) {
     if (!this.masterData) return null;
+    
+    // For indices, use predefined tokens
+    const indexTokens = {
+      'NIFTY': 'Nifty 50',
+      'BANKNIFTY': 'Nifty Bank',
+      'FINNIFTY': 'Nifty Fin Service',
+      'MIDCPNIFTY': 'NIFTY MIDCAP 100'
+    };
+    
+    if (indexTokens[symbol]) {
+      return indexTokens[symbol];
+    }
+    
     const instrument = this.masterData.find(item => 
-      item.pSymbolName === symbol || item.pDisplaySymbol === symbol
+      item.pSymbolName === symbol || 
+      item.pDisplaySymbol === symbol ||
+      item.pTrdSymbol === symbol
     );
-    return instrument ? instrument.pToken : null;
+    return instrument ? (instrument.pToken || instrument.pTrdSymbol) : null;
   }
 
   getAvailableIndices() {
-    if (!this.masterData) return [];
+    const predefinedIndices = [
+      { symbol: 'NIFTY', token: 'Nifty 50', displayName: 'NIFTY 50', exchange: 'nse_cm' },
+      { symbol: 'BANKNIFTY', token: 'Nifty Bank', displayName: 'BANK NIFTY', exchange: 'nse_cm' },
+      { symbol: 'FINNIFTY', token: 'Nifty Fin Service', displayName: 'FIN NIFTY', exchange: 'nse_cm' },
+      { symbol: 'MIDCPNIFTY', token: 'NIFTY MIDCAP 100', displayName: 'MIDCAP NIFTY', exchange: 'nse_cm' }
+    ];
+    
+    if (!this.masterData) return predefinedIndices;
     
     const indices = this.masterData
       .filter(item => item.pInstrumentName === 'INDEX')
       .map(item => ({
         symbol: item.pSymbolName,
-        token: item.pToken,
+        token: item.pToken || item.pTrdSymbol,
         displayName: item.pDisplaySymbol || item.pSymbolName,
         exchange: item.pExchange
       }));
     
-    return indices;
+    return [...predefinedIndices, ...indices];
   }
 
   isAuthenticated() {
-    return !!this.accessToken;
+    return !!(this.accessToken || this.viewToken);
   }
 
   getInstrumentDetails(token) {
     if (!this.masterData) return null;
-    return this.masterData.find(item => item.pToken === token);
+    return this.masterData.find(item => 
+      item.pToken === token || 
+      item.pTrdSymbol === token
+    );
   }
 
   searchInstruments(query) {
@@ -432,8 +541,9 @@ export class KotakNeoService extends EventEmitter {
     
     const searchTerm = query.toLowerCase();
     return this.masterData.filter(item => 
-      item.pSymbolName.toLowerCase().includes(searchTerm) ||
-      (item.pDisplaySymbol && item.pDisplaySymbol.toLowerCase().includes(searchTerm))
+      item.pSymbolName?.toLowerCase().includes(searchTerm) ||
+      item.pDisplaySymbol?.toLowerCase().includes(searchTerm) ||
+      item.pTrdSymbol?.toLowerCase().includes(searchTerm)
     );
   }
 }
