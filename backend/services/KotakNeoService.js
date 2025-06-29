@@ -5,43 +5,18 @@ import { EventEmitter } from 'events';
 export class KotakNeoService extends EventEmitter {
   constructor() {
     super();
-    this.baseUrl = 'https://gw-napi.kotaksecurities.com';
-    this.wsUrl = 'wss://mlhsm.kotaksecurities.com';
-    this.hsiUrl = 'wss://mis.kotaksecurities.com/realtime';
+    this.baseUrl = 'https://napi.kotaksecurities.com';
+    this.wsUrl = 'wss://gw-napi.kotaksecurities.com:443/realtime/1.0';
     this.accessToken = null;
-    this.sid = null;
-    this.rid = null;
-    this.hsServerId = null;
     this.websocket = null;
-    this.hsiWebsocket = null;
     this.masterData = [];
     this.subscribedTokens = new Set();
     this.userId = null;
-    this.mobileNumber = null;
     this.password = null;
-    this.mpin = null;
-    this.consumerKey = null;
-    this.consumerSecret = null;
-    this.ucc = null;
-    this.viewToken = null;
-    this.tradeToken = null;
+    this.pan = null;
+    this.mobileNumber = null;
     this.isLoggedIn = false;
-    this.neoFinkey = null;
-    this.oauthAccessToken = null;
     this.dataCenter = 'gdc';
-    
-    // OTP Management
-    this.otpGenerated = false;
-    this.otpGeneratedAt = null;
-    this.otpExpiry = 5 * 60 * 1000;
-    this.pendingOTPValidation = false;
-    this.tokenExpiry = 86400 * 1000;
-    this.tokenGeneratedAt = null;
-    
-    // Auto-refresh timer
-    this.tokenRefreshTimer = null;
-    this.heartbeatInterval = null;
-    this.hsiHeartbeatInterval = null;
     
     // Connection retry
     this.maxRetries = 5;
@@ -54,321 +29,146 @@ export class KotakNeoService extends EventEmitter {
     // Market data storage
     this.marketDataCache = new Map();
     this.lastPriceUpdate = new Map();
+    
+    // Heartbeat
+    this.heartbeatInterval = null;
   }
 
   async initialize() {
     try {
-      if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD || !process.env.KOTAK_ACCESS_TOKEN) {
-        console.log('⚠️ Kotak Neo credentials not configured. Please update your .env file with valid credentials.');
+      if (!process.env.KOTAK_ACCESS_TOKEN) {
+        console.log('⚠️ Kotak Neo OAuth2 access token not configured. Please update your .env file.');
+        console.log('📝 Required: KOTAK_ACCESS_TOKEN=your_oauth2_access_token');
         return;
       }
 
-      this.consumerKey = process.env.KOTAK_CONSUMER_KEY;
-      this.consumerSecret = process.env.KOTAK_CONSUMER_SECRET;
-      this.mobileNumber = process.env.KOTAK_MOBILE_NUMBER;
+      this.accessToken = process.env.KOTAK_ACCESS_TOKEN;
+      this.userId = process.env.KOTAK_USER_ID || 'client7327';
       this.password = process.env.KOTAK_PASSWORD;
-      this.mpin = process.env.KOTAK_MPIN;
-      this.ucc = process.env.KOTAK_UCC;
-      this.neoFinkey = process.env.KOTAK_NEO_FINKEY;
-      this.oauthAccessToken = process.env.KOTAK_ACCESS_TOKEN;
+      this.pan = process.env.KOTAK_PAN;
+      this.mobileNumber = process.env.KOTAK_MOBILE_NUMBER;
 
-      if (!this.mobileNumber.startsWith('+91')) {
-        this.mobileNumber = '+91' + this.mobileNumber;
+      console.log('🔐 Using OAuth2 access token for authentication...');
+      
+      // Test the access token
+      const isValid = await this.validateAccessToken();
+      if (isValid) {
+        this.isLoggedIn = true;
+        console.log('✅ OAuth2 access token is valid');
+        
+        await this.downloadMasterData();
+        this.connectWebSocket();
+        this.startDataRefreshInterval();
+        console.log('✅ Kotak Neo Service initialized successfully');
+      } else {
+        console.log('❌ OAuth2 access token is invalid or expired');
+        await this.refreshAccessToken();
       }
-
-      await this.startLoginProcess();
-      await this.downloadMasterData();
-      this.startDataRefreshInterval();
-      console.log('✅ Kotak Neo Service initialized successfully');
     } catch (error) {
       console.error('❌ Failed to initialize Kotak Neo Service:', error.message);
     }
   }
 
-  async startLoginProcess() {
+  async validateAccessToken() {
     try {
-      console.log('🔐 Starting Kotak Neo login process...');
-      
-      const viewToken = await this.getViewToken();
-      if (!viewToken) {
-        throw new Error('Failed to get view token');
-      }
+      const response = await fetch(`${this.baseUrl}/Accounts/1.0/wallets`, {
+        method: 'GET',
+        headers: this.getAuthHeaders()
+      });
 
-      console.log('📱 Generating OTP...');
-      const otpGenerated = await this.generateOTP();
-      
-      if (otpGenerated) {
-        console.log('✅ OTP sent successfully!');
-        this.pendingOTPValidation = true;
-        this.emit('otp_required', {
-          message: 'OTP sent to your registered mobile and email',
-          expiresIn: this.otpExpiry / 1000
-        });
-      } else {
-        console.log('⚠️ OTP generation failed. Continuing with view token only...');
-        this.accessToken = this.viewToken;
-        this.isLoggedIn = true;
-        this.tokenGeneratedAt = Date.now();
-        this.connectWebSockets();
+      if (response.ok) {
+        const data = await response.json();
+        return !data.fault;
       }
-
-      return true;
+      return false;
     } catch (error) {
-      console.error('❌ Login process failed:', error);
-      throw error;
+      console.error('❌ Token validation failed:', error);
+      return false;
     }
   }
 
-  async getViewToken() {
+  async refreshAccessToken() {
     try {
-      const loginPayload = {
-        mobileNumber: this.mobileNumber,
+      console.log('🔄 Refreshing OAuth2 access token...');
+      
+      if (!this.userId || !this.password) {
+        throw new Error('Username and password required for token refresh');
+      }
+
+      const body = new URLSearchParams({
+        grant_type: 'password',
+        scope: 'all',
+        username: this.userId,
         password: this.password
-      };
-
-      const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.oauthAccessToken}`,
-          'accept': '*/*'
-        },
-        body: JSON.stringify(loginPayload)
       });
 
-      const loginData = await loginResponse.json();
-
-      if (!loginResponse.ok || loginData.fault) {
-        throw new Error(`Login failed: ${loginData.fault?.message || loginResponse.statusText}`);
+      if (this.pan) {
+        body.append('pan', this.pan);
       }
 
-      if (!loginData.data) {
-        throw new Error('Login failed: No data in response');
-      }
-
-      this.viewToken = loginData.data.token;
-      this.userId = loginData.data.ucc;
-      this.ucc = loginData.data.ucc || this.ucc;
-      this.sid = loginData.data.sid;
-      this.rid = loginData.data.rid;
-      this.hsServerId = loginData.data.hsServerId;
-      this.dataCenter = loginData.data.dataCenter || 'gdc';
-
-      if (this.viewToken) {
-        try {
-          const tokenParts = this.viewToken.split('.');
-          if (tokenParts.length === 3) {
-            const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
-            this.userId = payload.sub || this.userId;
-          }
-        } catch (decodeError) {
-          console.log('⚠️ Could not decode JWT token');
-        }
-      }
-
-      console.log(`✅ View token obtained. User ID: ${this.userId}, Data Center: ${this.dataCenter}`);
-      return this.viewToken;
-    } catch (error) {
-      console.error('❌ Failed to get view token:', error);
-      throw error;
-    }
-  }
-
-  async generateOTP() {
-    try {
-      if (!this.userId) {
-        throw new Error('User ID not available for OTP generation');
-      }
-
-      const otpPayload = {
-        userId: this.userId,
-        sendEmail: true,
-        isWhitelisted: true
-      };
-
-      const otpResponse = await fetch(`${this.baseUrl}/login/1.0/login/otp/generate`, {
+      const response = await fetch(`${this.baseUrl}/oauth2/token`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.oauthAccessToken}`,
-          'accept': '*/*'
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'accept': 'application/json'
         },
-        body: JSON.stringify(otpPayload)
+        body: body.toString()
       });
 
-      const otpData = await otpResponse.json();
+      const data = await response.json();
 
-      if (!otpResponse.ok || otpData.fault) {
-        console.log(`⚠️ OTP generation failed: ${otpData.fault?.message || 'Unknown error'}`);
-        return false;
+      if (!response.ok || data.fault) {
+        throw new Error(`OAuth2 token refresh failed: ${data.fault?.message || response.statusText}`);
       }
 
-      if (otpData.data) {
-        this.otpGenerated = true;
-        this.otpGeneratedAt = Date.now();
-        
-        setTimeout(() => {
-          if (this.pendingOTPValidation) {
-            console.log('⏰ OTP expired. Please regenerate OTP.');
-            this.otpGenerated = false;
-            this.otpGeneratedAt = null;
-            this.emit('otp_expired');
-          }
-        }, this.otpExpiry);
-        
-        return true;
-      }
-
-      return false;
-    } catch (error) {
-      console.error('❌ OTP generation failed:', error);
-      return false;
-    }
-  }
-
-  async validateOTP(otp) {
-    try {
-      if (!this.pendingOTPValidation || !this.otpGenerated) {
-        throw new Error('No pending OTP validation or OTP expired');
-      }
-
-      if (Date.now() - this.otpGeneratedAt > this.otpExpiry) {
-        this.otpGenerated = false;
-        this.otpGeneratedAt = null;
-        throw new Error('OTP has expired. Please regenerate OTP.');
-      }
-
-      const sessionPayload = {
-        userId: this.userId,
-        otp: otp
-      };
-
-      const sessionResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.oauthAccessToken}`,
-          'sid': this.sid,
-          'Auth': this.viewToken,
-          'accept': '*/*'
-        },
-        body: JSON.stringify(sessionPayload)
-      });
-
-      const sessionData = await sessionResponse.json();
-
-      if (!sessionResponse.ok || sessionData.fault) {
-        throw new Error(`OTP validation failed: ${sessionData.fault?.message || 'Unknown error'}`);
-      }
-
-      if (sessionData.data && sessionData.data.token) {
-        this.tradeToken = sessionData.data.token;
-        this.accessToken = this.tradeToken;
-        this.sid = sessionData.data.sid || this.sid;
-        this.rid = sessionData.data.rid || this.rid;
-        this.hsServerId = sessionData.data.hsServerId || this.hsServerId;
-        this.dataCenter = sessionData.data.dataCenter || this.dataCenter;
-        
-        this.pendingOTPValidation = false;
-        this.otpGenerated = false;
-        this.otpGeneratedAt = null;
+      if (data.access_token) {
+        this.accessToken = data.access_token;
         this.isLoggedIn = true;
-        this.tokenGeneratedAt = Date.now();
+        console.log('✅ OAuth2 access token refreshed successfully');
         
-        console.log('✅ OTP validated successfully! Trade token generated.');
+        // Update environment variable (for this session)
+        process.env.KOTAK_ACCESS_TOKEN = this.accessToken;
         
-        this.connectWebSockets();
-        
-        this.emit('login_success', {
-          message: 'Login completed successfully',
-          canTrade: true
-        });
-        
-        return {
-          success: true,
-          message: 'OTP validated successfully',
-          canTrade: true
-        };
+        this.connectWebSocket();
+        return true;
       } else {
-        throw new Error('Session token not found in response');
+        throw new Error('No access token in response');
       }
     } catch (error) {
-      console.error('❌ OTP validation failed:', error);
-      
-      if (error.message.includes('Invalid OTP') || error.message.includes('OTP')) {
-        this.otpGenerated = false;
-        this.otpGeneratedAt = null;
-      }
-      
+      console.error('❌ Token refresh failed:', error);
       throw error;
     }
   }
 
-  async regenerateOTP() {
-    try {
-      console.log('🔄 Regenerating OTP...');
-      
-      this.otpGenerated = false;
-      this.otpGeneratedAt = null;
-      this.pendingOTPValidation = false;
-      
-      const otpGenerated = await this.generateOTP();
-      
-      if (otpGenerated) {
-        this.pendingOTPValidation = true;
-        console.log('✅ New OTP generated successfully!');
-        this.emit('otp_regenerated', {
-          message: 'New OTP sent to your registered mobile and email',
-          expiresIn: this.otpExpiry / 1000
-        });
-        
-        return {
-          success: true,
-          message: 'New OTP sent successfully',
-          expiresIn: this.otpExpiry / 1000
-        };
-      } else {
-        throw new Error('Failed to generate new OTP');
-      }
-    } catch (error) {
-      console.error('❌ OTP regeneration failed:', error);
-      throw error;
-    }
-  }
-
-  connectWebSockets() {
-    if (!this.sid || !this.accessToken) {
-      console.log('⚠️ Cannot connect WebSocket: Missing SID or token');
+  connectWebSocket() {
+    if (!this.accessToken) {
+      console.log('⚠️ Cannot connect WebSocket: Missing access token');
       return;
     }
 
-    console.log('🔌 Connecting to WebSockets...');
-    this.connectHSM();
-    this.connectHSI();
-  }
-
-  connectHSM() {
+    console.log('🔌 Connecting to Kotak Neo WebSocket...');
+    
     if (this.websocket) {
       this.websocket.close();
     }
 
-    console.log('🔌 Connecting to HSM WebSocket...');
     this.websocket = new WebSocket(this.wsUrl);
 
     this.websocket.on('open', () => {
-      console.log('✅ HSM WebSocket connected');
+      console.log('✅ WebSocket connected to Kotak Neo');
       
-      const connectionMsg = {
-        Authorization: this.accessToken,
-        Sid: this.sid,
-        type: "cn"
+      // Authenticate WebSocket
+      const authMessage = {
+        type: 'authenticate',
+        token: this.accessToken
       };
       
-      this.websocket.send(JSON.stringify(connectionMsg));
+      this.websocket.send(JSON.stringify(authMessage));
       
+      // Start heartbeat
       this.heartbeatInterval = setInterval(() => {
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-          this.websocket.send(JSON.stringify({type: "ti", scrips: ""}));
+          this.websocket.send(JSON.stringify({ type: 'ping' }));
         }
       }, 30000);
       
@@ -380,166 +180,115 @@ export class KotakNeoService extends EventEmitter {
     this.websocket.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
-        this.handleHSMMessage(message);
+        this.handleWebSocketMessage(message);
       } catch (error) {
-        console.error('❌ HSM WebSocket message parse error:', error);
+        console.error('❌ WebSocket message parse error:', error);
       }
     });
 
     this.websocket.on('close', (code, reason) => {
-      console.log(`⚠️ HSM WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
+      console.log(`⚠️ WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
       if (this.heartbeatInterval) {
         clearInterval(this.heartbeatInterval);
       }
       
-      if (this.retryCount < this.maxRetries) {
+      if (this.retryCount < this.maxRetries && this.isLoggedIn) {
         setTimeout(() => {
           this.retryCount++;
-          this.connectHSM();
+          console.log(`🔄 Retrying WebSocket connection (${this.retryCount}/${this.maxRetries})...`);
+          this.connectWebSocket();
         }, this.retryDelay);
       }
     });
 
     this.websocket.on('error', (error) => {
-      console.error('❌ HSM WebSocket error:', error);
-    });
-  }
-
-  connectHSI() {
-    if (this.hsiWebsocket) {
-      this.hsiWebsocket.close();
-    }
-
-    let hsiUrl = this.hsiUrl;
-    if (this.dataCenter === 'adc') {
-      hsiUrl = 'wss://cis.kotaksecurities.com/realtime';
-    } else if (this.dataCenter === 'e21') {
-      hsiUrl = 'wss://e21.kotaksecurities.com/realtime';
-    } else if (this.dataCenter === 'e22') {
-      hsiUrl = 'wss://e22.kotaksecurities.com/realtime';
-    } else if (this.dataCenter === 'e41') {
-      hsiUrl = 'wss://e41.kotaksecurities.com/realtime';
-    } else if (this.dataCenter === 'e43') {
-      hsiUrl = 'wss://e43.kotaksecurities.com/realtime';
-    }
-
-    console.log(`🔌 Connecting to HSI WebSocket: ${hsiUrl}`);
-    this.hsiWebsocket = new WebSocket(hsiUrl);
-
-    this.hsiWebsocket.on('open', () => {
-      console.log('✅ HSI WebSocket connected');
-      
-      const connectionMsg = {
-        type: "cn",
-        Authorization: this.accessToken,
-        Sid: this.sid,
-        source: "WEB"
-      };
-      
-      this.hsiWebsocket.send(JSON.stringify(connectionMsg));
-      
-      this.hsiHeartbeatInterval = setInterval(() => {
-        if (this.hsiWebsocket && this.hsiWebsocket.readyState === WebSocket.OPEN) {
-          this.hsiWebsocket.send(JSON.stringify({type: "hb"}));
-        }
-      }, 30000);
-    });
-
-    this.hsiWebsocket.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        this.handleHSIMessage(message);
-      } catch (error) {
-        console.error('❌ HSI WebSocket message parse error:', error);
-      }
-    });
-
-    this.hsiWebsocket.on('close', (code, reason) => {
-      console.log(`⚠️ HSI WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
-      if (this.hsiHeartbeatInterval) {
-        clearInterval(this.hsiHeartbeatInterval);
-      }
-    });
-
-    this.hsiWebsocket.on('error', (error) => {
-      console.error('❌ HSI WebSocket error:', error);
+      console.error('❌ WebSocket error:', error);
     });
   }
 
   subscribeToDefaultIndices() {
     try {
-      const indicesSubscription = {
-        type: "ifs",
-        scrips: "nse_cm|Nifty 50&nse_cm|Nifty Bank&nse_cm|Nifty Fin Service&nse_cm|NIFTY MIDCAP 100",
-        channelnum: 1
+      const defaultInstruments = [
+        'NSE_INDEX|Nifty 50',
+        'NSE_INDEX|Nifty Bank',
+        'NSE_INDEX|Nifty Fin Service',
+        'NSE_INDEX|NIFTY MIDCAP 100'
+      ];
+      
+      const subscribeMessage = {
+        type: 'subscribe',
+        mode: 'full',
+        instrumentKeys: defaultInstruments
       };
       
       if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-        this.websocket.send(JSON.stringify(indicesSubscription));
-        console.log('📡 Subscribed to default indices');
+        this.websocket.send(JSON.stringify(subscribeMessage));
+        console.log('📡 Subscribed to default indices via WebSocket');
       }
     } catch (error) {
       console.error('❌ Failed to subscribe to default indices:', error);
     }
   }
 
-  handleHSMMessage(message) {
+  handleWebSocketMessage(message) {
     try {
-      console.log('📊 HSM Message received:', JSON.stringify(message));
+      console.log('📊 WebSocket message received:', JSON.stringify(message));
       
-      // Handle market data messages
-      if (message.type === 'mf' || message.type === 'sf') {
+      if (message.type === 'authenticated') {
+        console.log('✅ WebSocket authenticated successfully');
+        return;
+      }
+      
+      if (message.type === 'subscribed') {
+        console.log('✅ WebSocket subscription confirmed');
+        return;
+      }
+      
+      // Handle market data updates
+      if (message.type === 'feed' && message.data) {
+        const feedData = message.data;
+        
         const marketData = {
-          token: message.tk,
-          symbol: message.ts || message.tk,
-          ltp: parseFloat(message.lp) || 0,
-          change: parseFloat(message.c) || 0,
-          changePercent: parseFloat(message.cp) || 0,
-          volume: parseInt(message.v) || 0,
-          timestamp: message.ft || new Date().toISOString(),
-          high: parseFloat(message.h) || 0,
-          low: parseFloat(message.l) || 0,
-          open: parseFloat(message.o) || 0,
-          close: parseFloat(message.pc) || 0
+          token: feedData.instrument_token || feedData.tk,
+          symbol: this.getSymbolFromToken(feedData.instrument_token || feedData.tk),
+          ltp: parseFloat(feedData.last_price || feedData.lp) || 0,
+          change: parseFloat(feedData.change || feedData.c) || 0,
+          changePercent: parseFloat(feedData.change_percent || feedData.cp) || 0,
+          volume: parseInt(feedData.volume || feedData.v) || 0,
+          timestamp: feedData.timestamp || new Date().toISOString(),
+          high: parseFloat(feedData.high || feedData.h) || 0,
+          low: parseFloat(feedData.low || feedData.l) || 0,
+          open: parseFloat(feedData.open || feedData.o) || 0,
+          close: parseFloat(feedData.prev_close || feedData.pc) || 0
         };
         
         // Store in cache
-        this.marketDataCache.set(message.tk, marketData);
-        this.lastPriceUpdate.set(message.tk, Date.now());
+        this.marketDataCache.set(marketData.token, marketData);
+        this.lastPriceUpdate.set(marketData.token, Date.now());
         
         console.log(`📈 Market Data - ${marketData.symbol}: LTP=${marketData.ltp}, Change=${marketData.change}`);
         
         this.emit('market_data', marketData);
       }
-      
-      // Handle connection acknowledgment
-      if (message.type === 'cn') {
-        console.log('✅ HSM Connection acknowledged');
-      }
     } catch (error) {
-      console.error('❌ Error handling HSM message:', error);
+      console.error('❌ Error handling WebSocket message:', error);
     }
   }
 
-  handleHSIMessage(message) {
-    try {
-      console.log('📋 HSI Message received:', JSON.stringify(message));
-      
-      if (message.type === 'order_update') {
-        this.emit('order_update', message);
-      }
-      
-      if (message.type === 'cn') {
-        console.log('✅ HSI Connection acknowledged');
-      }
-    } catch (error) {
-      console.error('❌ Error handling HSI message:', error);
-    }
+  getSymbolFromToken(token) {
+    const tokenMap = {
+      'NSE_INDEX|Nifty 50': 'NIFTY',
+      'NSE_INDEX|Nifty Bank': 'BANKNIFTY',
+      'NSE_INDEX|Nifty Fin Service': 'FINNIFTY',
+      'NSE_INDEX|NIFTY MIDCAP 100': 'MIDCPNIFTY'
+    };
+    
+    return tokenMap[token] || token;
   }
 
   async subscribeToTokens(tokens) {
     if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
-      console.log('⚠️ HSM WebSocket not connected, cannot subscribe to tokens');
+      console.log('⚠️ WebSocket not connected, cannot subscribe to tokens');
       return;
     }
 
@@ -550,12 +299,12 @@ export class KotakNeoService extends EventEmitter {
     }
 
     try {
-      const scripsString = newTokens.map(token => `nse_cm|${token}`).join('&');
+      const instrumentKeys = newTokens.map(token => `NSE_INDEX|${token}`);
       
       const subscribeMessage = {
-        type: "ifs",
-        scrips: scripsString,
-        channelnum: 1
+        type: 'subscribe',
+        mode: 'full',
+        instrumentKeys: instrumentKeys
       };
 
       this.websocket.send(JSON.stringify(subscribeMessage));
@@ -567,40 +316,13 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  startDataRefreshInterval() {
-    this.dataRefreshInterval = setInterval(async () => {
-      try {
-        if (this.isAuthenticated()) {
-          const [positions, orders, wallet] = await Promise.all([
-            this.getPositions(),
-            this.getOrders(),
-            this.getWalletBalance()
-          ]);
-          
-          this.emit('data_update', {
-            positions,
-            orders,
-            wallet,
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (error) {
-        console.error('❌ Failed to refresh data:', error);
-      }
-    }, 5000);
-  }
-
   async downloadMasterData() {
     try {
-      console.log('📊 Downloading master data file paths...');
+      console.log('📊 Downloading master data...');
       
       const response = await fetch(`${this.baseUrl}/Files/1.0/masterscrip/v2/file-paths`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.oauthAccessToken}`,
-          'accept': '*/*'
-        }
+        headers: this.getAuthHeaders()
       });
 
       if (!response.ok) {
@@ -616,13 +338,15 @@ export class KotakNeoService extends EventEmitter {
       if (data.data && data.data.filesPaths && Array.isArray(data.data.filesPaths)) {
         console.log(`📊 Found ${data.data.filesPaths.length} master data files`);
         
-        const nseCmPath = data.data.filesPaths.find(path => path.includes('nse_cm-v1.csv'));
+        // Download NSE CM data
+        const nseCmPath = data.data.filesPaths.find(path => path.includes('nse_cm'));
         if (nseCmPath) {
           console.log('📥 Downloading NSE CM data...');
           await this.downloadAndParseMasterFile(nseCmPath);
         }
         
-        const nseFoPath = data.data.filesPaths.find(path => path.includes('nse_fo.csv'));
+        // Download NSE FO data
+        const nseFoPath = data.data.filesPaths.find(path => path.includes('nse_fo'));
         if (nseFoPath) {
           console.log('📥 Downloading NSE FO data...');
           await this.downloadAndParseMasterFile(nseFoPath);
@@ -667,6 +391,7 @@ export class KotakNeoService extends EventEmitter {
             instrument[header] = values[index] || '';
           });
           
+          // Filter for indices and options
           if (instrument.pSymbolName && (
             instrument.pSymbolName.includes('NIFTY') || 
             instrument.pSymbolName.includes('BANKNIFTY') ||
@@ -677,11 +402,6 @@ export class KotakNeoService extends EventEmitter {
           )) {
             if (instrument.dStrikePrice) {
               instrument.strikePrice = parseFloat(instrument.dStrikePrice) / 100;
-            }
-            
-            if (instrument.lExpiryDate && fileUrl.includes('nse_fo')) {
-              const epochTime = parseInt(instrument.lExpiryDate) + 315513000;
-              instrument.expiryDate = new Date(epochTime * 1000);
             }
             
             instruments.push(instrument);
@@ -700,38 +420,9 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async getOptionChain(symbol, expiryDate) {
-    try {
-      const instrumentToken = this.getInstrumentToken(symbol);
-      if (!instrumentToken) {
-        throw new Error(`Instrument token not found for symbol: ${symbol}`);
-      }
-
-      const response = await fetch(`${this.baseUrl}/optionchain/1.0/optionchain/optionchain`, {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({
-          instrumentToken: instrumentToken,
-          expiryDate: expiryDate
-        })
-      });
-
-      const data = await response.json();
-      
-      if (data.fault) {
-        throw new Error(`Option chain API error: ${data.fault.message || data.fault.description}`);
-      }
-      
-      return data.data || null;
-    } catch (error) {
-      console.error('❌ Failed to get option chain:', error);
-      return null;
-    }
-  }
-
   async getPositions() {
     try {
-      const response = await fetch(`${this.baseUrl}/Positions/2.0/positions/todays`, {
+      const response = await fetch(`${this.baseUrl}/Positions/2.0/positions`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
@@ -743,6 +434,7 @@ export class KotakNeoService extends EventEmitter {
         return [];
       }
       
+      console.log('📊 Positions fetched:', data.data?.length || 0);
       return data.data || [];
     } catch (error) {
       console.error('❌ Failed to get positions:', error);
@@ -764,6 +456,7 @@ export class KotakNeoService extends EventEmitter {
         return [];
       }
       
+      console.log('📋 Orders fetched:', data.data?.length || 0);
       return data.data || [];
     } catch (error) {
       console.error('❌ Failed to get orders:', error);
@@ -773,7 +466,7 @@ export class KotakNeoService extends EventEmitter {
 
   async getWalletBalance() {
     try {
-      const response = await fetch(`${this.baseUrl}/Limits/1.0/limits`, {
+      const response = await fetch(`${this.baseUrl}/Accounts/1.0/wallets`, {
         method: 'GET',
         headers: this.getAuthHeaders()
       });
@@ -785,12 +478,15 @@ export class KotakNeoService extends EventEmitter {
         return { available: 0, used: 0, total: 0 };
       }
       
-      const limits = data.data || {};
-      return {
-        available: parseFloat(limits.availableMargin || 0),
-        used: parseFloat(limits.usedMargin || 0),
-        total: parseFloat(limits.totalMargin || 0)
+      const walletData = data.data || {};
+      const result = {
+        available: parseFloat(walletData.availableMargin || walletData.available || 0),
+        used: parseFloat(walletData.usedMargin || walletData.used || 0),
+        total: parseFloat(walletData.totalMargin || walletData.total || 0)
       };
+      
+      console.log('💰 Wallet balance fetched:', result);
+      return result;
     } catch (error) {
       console.error('❌ Failed to get wallet balance:', error);
       return { available: 0, used: 0, total: 0 };
@@ -799,18 +495,16 @@ export class KotakNeoService extends EventEmitter {
 
   async placeOrder(orderDetails) {
     try {
-      if (!this.tradeToken) {
-        throw new Error('Trade token not available. Please complete OTP validation to enable trading.');
+      if (!this.accessToken) {
+        throw new Error('Access token not available. Please authenticate first.');
       }
 
-      const headers = this.getAuthHeaders(true);
-      
       const kotakOrder = {
         am: orderDetails.am || "NO",
         dq: orderDetails.dq || "0",
-        es: orderDetails.es || "nse_cm",
+        es: orderDetails.es || "nse_fo",
         mp: orderDetails.mp || "0",
-        pc: orderDetails.pc || "CNC",
+        pc: orderDetails.pc || "MIS",
         pf: orderDetails.pf || "N",
         pr: orderDetails.pr || orderDetails.price?.toString(),
         pt: orderDetails.pt || "L",
@@ -823,7 +517,7 @@ export class KotakNeoService extends EventEmitter {
 
       const response = await fetch(`${this.baseUrl}/Orders/2.0/quick/order/rule/ms/place`, {
         method: 'POST',
-        headers: headers,
+        headers: this.getAuthHeaders(),
         body: JSON.stringify(kotakOrder)
       });
 
@@ -841,85 +535,48 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  getAuthHeaders(useTradeToken = false) {
+  getAuthHeaders() {
     const headers = {
       'Content-Type': 'application/json',
-      'accept': '*/*'
+      'accept': 'application/json'
     };
 
-    const token = useTradeToken && this.tradeToken ? this.tradeToken : this.accessToken;
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    if (this.neoFinkey) {
-      headers['neo-fin-key'] = this.neoFinkey;
+    if (this.accessToken) {
+      headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
 
     return headers;
   }
 
-  async refreshTokens() {
-    try {
-      console.log('🔄 Refreshing authentication tokens...');
-      
-      this.isLoggedIn = false;
-      this.accessToken = null;
-      this.viewToken = null;
-      this.tradeToken = null;
-      
-      await this.startLoginProcess();
-      
-      console.log('✅ Tokens refreshed successfully');
-      this.emit('tokens_refreshed');
-      
-      return true;
-    } catch (error) {
-      console.error('❌ Token refresh failed:', error);
-      throw error;
-    }
-  }
-
-  getOTPStatus() {
-    return {
-      otpRequired: this.pendingOTPValidation,
-      otpGenerated: this.otpGenerated,
-      otpExpired: this.otpGenerated && (Date.now() - this.otpGeneratedAt > this.otpExpiry),
-      timeRemaining: this.otpGenerated ? Math.max(0, this.otpExpiry - (Date.now() - this.otpGeneratedAt)) : 0,
-      canTrade: this.canTrade()
-    };
-  }
-
-  getInstrumentToken(symbol) {
-    const indexTokens = {
-      'NIFTY': 'Nifty 50',
-      'BANKNIFTY': 'Nifty Bank',
-      'FINNIFTY': 'Nifty Fin Service',
-      'MIDCPNIFTY': 'NIFTY MIDCAP 100'
-    };
-    
-    if (indexTokens[symbol]) {
-      return indexTokens[symbol];
-    }
-    
-    if (!this.masterData) return null;
-    
-    const instrument = this.masterData.find(item => 
-      item.pSymbolName === symbol || 
-      item.pDisplaySymbol === symbol ||
-      item.pTrdSymbol === symbol
-    );
-    
-    return instrument ? (instrument.pToken || instrument.pTrdSymbol) : null;
+  startDataRefreshInterval() {
+    this.dataRefreshInterval = setInterval(async () => {
+      try {
+        if (this.isAuthenticated()) {
+          const [positions, orders, wallet] = await Promise.all([
+            this.getPositions(),
+            this.getOrders(),
+            this.getWalletBalance()
+          ]);
+          
+          this.emit('data_update', {
+            positions,
+            orders,
+            wallet,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (error) {
+        console.error('❌ Failed to refresh data:', error);
+      }
+    }, 5000);
   }
 
   getAvailableIndices() {
     const predefinedIndices = [
-      { symbol: 'NIFTY', token: 'Nifty 50', displayName: 'NIFTY 50', exchange: 'nse_cm' },
-      { symbol: 'BANKNIFTY', token: 'Nifty Bank', displayName: 'BANK NIFTY', exchange: 'nse_cm' },
-      { symbol: 'FINNIFTY', token: 'Nifty Fin Service', displayName: 'FIN NIFTY', exchange: 'nse_cm' },
-      { symbol: 'MIDCPNIFTY', token: 'NIFTY MIDCAP 100', displayName: 'MIDCAP NIFTY', exchange: 'nse_cm' }
+      { symbol: 'NIFTY', token: 'NSE_INDEX|Nifty 50', displayName: 'NIFTY 50', exchange: 'NSE_INDEX' },
+      { symbol: 'BANKNIFTY', token: 'NSE_INDEX|Nifty Bank', displayName: 'BANK NIFTY', exchange: 'NSE_INDEX' },
+      { symbol: 'FINNIFTY', token: 'NSE_INDEX|Nifty Fin Service', displayName: 'FIN NIFTY', exchange: 'NSE_INDEX' },
+      { symbol: 'MIDCPNIFTY', token: 'NSE_INDEX|NIFTY MIDCAP 100', displayName: 'MIDCAP NIFTY', exchange: 'NSE_INDEX' }
     ];
     
     if (!this.masterData || this.masterData.length === 0) {
@@ -930,9 +587,9 @@ export class KotakNeoService extends EventEmitter {
       .filter(item => item.pInstrumentName === 'INDEX')
       .map(item => ({
         symbol: item.pSymbolName,
-        token: item.pToken || item.pTrdSymbol,
+        token: `NSE_INDEX|${item.pSymbolName}`,
         displayName: item.pDisplaySymbol || item.pSymbolName,
-        exchange: item.pExchange
+        exchange: item.pExchange || 'NSE_INDEX'
       }));
     
     // Merge predefined with master data, avoiding duplicates
@@ -947,11 +604,11 @@ export class KotakNeoService extends EventEmitter {
   }
 
   isAuthenticated() {
-    return this.isLoggedIn && !!(this.accessToken || this.viewToken);
+    return this.isLoggedIn && !!this.accessToken;
   }
 
   canTrade() {
-    return this.isAuthenticated() && !!this.tradeToken;
+    return this.isAuthenticated();
   }
 
   getMarketDataForSymbol(symbol) {
@@ -961,24 +618,49 @@ export class KotakNeoService extends EventEmitter {
     return this.marketDataCache.get(token) || null;
   }
 
+  getInstrumentToken(symbol) {
+    const indexTokens = {
+      'NIFTY': 'NSE_INDEX|Nifty 50',
+      'BANKNIFTY': 'NSE_INDEX|Nifty Bank',
+      'FINNIFTY': 'NSE_INDEX|Nifty Fin Service',
+      'MIDCPNIFTY': 'NSE_INDEX|NIFTY MIDCAP 100'
+    };
+    
+    return indexTokens[symbol] || null;
+  }
+
+  // Legacy methods for compatibility
+  getOTPStatus() {
+    return {
+      otpRequired: false,
+      otpGenerated: false,
+      otpExpired: false,
+      timeRemaining: 0,
+      canTrade: this.canTrade()
+    };
+  }
+
+  async validateOTP(otp) {
+    throw new Error('OTP validation not required for OAuth2 flow');
+  }
+
+  async regenerateOTP() {
+    throw new Error('OTP regeneration not required for OAuth2 flow');
+  }
+
+  async refreshTokens() {
+    return await this.refreshAccessToken();
+  }
+
   cleanup() {
-    if (this.tokenRefreshTimer) {
-      clearTimeout(this.tokenRefreshTimer);
-    }
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
-    }
-    if (this.hsiHeartbeatInterval) {
-      clearInterval(this.hsiHeartbeatInterval);
     }
     if (this.dataRefreshInterval) {
       clearInterval(this.dataRefreshInterval);
     }
     if (this.websocket) {
       this.websocket.close();
-    }
-    if (this.hsiWebsocket) {
-      this.hsiWebsocket.close();
     }
   }
 }
