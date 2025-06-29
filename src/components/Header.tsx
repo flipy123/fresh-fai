@@ -44,6 +44,7 @@ export const Header: React.FC = () => {
         const response = await api.get(`/kotak/market-data/${state.selectedIndex}`);
         if (response.data.success && response.data.data) {
           setCurrentMarketData(response.data.data);
+          console.log('📈 Market data fetched:', response.data.data);
         }
       } catch (error) {
         console.error('Failed to fetch market data:', error);
@@ -57,6 +58,7 @@ export const Header: React.FC = () => {
 
   useEffect(() => {
     if (marketData) {
+      console.log('📊 WebSocket market data received:', marketData);
       setCurrentMarketData(marketData);
     }
   }, [marketData]);

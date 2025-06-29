@@ -7,21 +7,41 @@ export const ControlPanel: React.FC = () => {
   const { state, dispatch } = useTrading();
   const { api } = useApi();
   const [availableIndices, setAvailableIndices] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchAvailableIndices = async () => {
       try {
+        setLoading(true);
+        console.log('🔄 Fetching available indices...');
+        
         const response = await api.get('/kotak/indices');
         if (response.data.success) {
           setAvailableIndices(response.data.data);
-          console.log('📊 Available indices:', response.data.data);
+          console.log('📊 Available indices fetched:', response.data.data);
+        } else {
+          console.error('Failed to fetch indices:', response.data);
         }
       } catch (error) {
         console.error('Failed to fetch available indices:', error);
+        // Set default indices if API fails
+        setAvailableIndices([
+          { symbol: 'NIFTY', displayName: 'NIFTY 50' },
+          { symbol: 'BANKNIFTY', displayName: 'BANK NIFTY' },
+          { symbol: 'FINNIFTY', displayName: 'FIN NIFTY' },
+          { symbol: 'MIDCPNIFTY', displayName: 'MIDCAP NIFTY' }
+        ]);
+      } finally {
+        setLoading(false);
       }
     };
 
     fetchAvailableIndices();
+    
+    // Refresh indices every 30 seconds
+    const interval = setInterval(fetchAvailableIndices, 30000);
+    
+    return () => clearInterval(interval);
   }, [api]);
 
   const handleToggleTrading = () => {
@@ -77,10 +97,12 @@ export const ControlPanel: React.FC = () => {
             <select
               value={state.selectedIndex}
               onChange={handleIndexChange}
-              disabled={state.isTrading}
-              className="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 focus:border-blue-400 focus:outline-none"
+              disabled={state.isTrading || loading}
+              className="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 focus:border-blue-400 focus:outline-none min-w-[150px]"
             >
-              {availableIndices.length > 0 ? (
+              {loading ? (
+                <option value="">Loading...</option>
+              ) : availableIndices.length > 0 ? (
                 availableIndices.map((index) => (
                   <option key={index.symbol} value={index.symbol}>
                     {index.displayName}
@@ -95,6 +117,9 @@ export const ControlPanel: React.FC = () => {
                 </>
               )}
             </select>
+            {loading && (
+              <div className="text-xs text-blue-400">Fetching indices...</div>
+            )}
           </div>
 
           <div className="flex items-center space-x-2">

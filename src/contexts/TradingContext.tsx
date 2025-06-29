@@ -125,12 +125,19 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
       dispatch({ type: 'ADD_LOG', payload: `Order update: ${data.status}` });
     };
 
+    const handleMarketData = (data: any) => {
+      console.log('📈 Market data received in context:', data);
+      // Market data is handled by the Header component directly
+    };
+
     socket.on('data_update', handleDataUpdate);
     socket.on('order_update', handleOrderUpdate);
+    socket.on('market_data', handleMarketData);
 
     return () => {
       socket.off('data_update', handleDataUpdate);
       socket.off('order_update', handleOrderUpdate);
+      socket.off('market_data', handleMarketData);
     };
   }, [socket]);
 

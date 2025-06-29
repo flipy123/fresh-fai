@@ -10,6 +10,10 @@ export class GPTService {
     console.log('🔑 GPT Service initialized:');
     console.log('  - OpenAI API Key:', this.openaiApiKey ? '✅ Configured' : '❌ Missing');
     console.log('  - OpenRouter API Key:', this.openrouterApiKey ? '✅ Configured' : '❌ Missing');
+    
+    if (this.openrouterApiKey) {
+      console.log('  - OpenRouter Key Preview:', this.openrouterApiKey.substring(0, 10) + '...');
+    }
   }
 
   async sendToGPT(marketData, provider = 'openai') {
@@ -227,6 +231,7 @@ Please analyze and provide trading decision.`;
           return 'OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file to use this provider.';
         }
         console.log('🔑 OpenRouter key available:', this.openrouterApiKey ? 'Yes' : 'No');
+        console.log('🔑 OpenRouter key preview:', this.openrouterApiKey.substring(0, 10) + '...');
       }
       
       if (provider === 'openai') {
