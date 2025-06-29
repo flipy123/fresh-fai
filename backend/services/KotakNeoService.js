@@ -77,7 +77,7 @@ export class KotakNeoService extends EventEmitter {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey,
+          'apikey': this.consumerKey,
           'accept': '*/*'
         },
         body: JSON.stringify(loginPayload)
@@ -173,7 +173,7 @@ export class KotakNeoService extends EventEmitter {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey,
+          'apikey': this.consumerKey,
           'accept': '*/*'
         },
         body: JSON.stringify(viewTokenPayload)
@@ -237,7 +237,7 @@ export class KotakNeoService extends EventEmitter {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'consumerKey': this.consumerKey,
+          'apikey': this.consumerKey,
           'accept': '*/*'
         },
         body: JSON.stringify(tradeTokenPayload)
@@ -680,7 +680,7 @@ export class KotakNeoService extends EventEmitter {
     }
     
     if (this.consumerKey) {
-      headers['consumerKey'] = this.consumerKey;
+      headers['apikey'] = this.consumerKey;
     }
 
     // Add Neo Finkey if available
