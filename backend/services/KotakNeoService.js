@@ -69,11 +69,14 @@ export class KotakNeoService extends EventEmitter {
 
       console.log('📤 Login payload:', { mobileNumber: this.mobileNumber, password: '***' });
 
+      // Create Basic Auth token using consumer key and secret
+      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
+
       const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'apikey': this.consumerKey,
+          'Authorization': `Basic ${basicAuthToken}`,
           'accept': '*/*'
         },
         body: JSON.stringify(loginPayload)
@@ -135,6 +138,7 @@ export class KotakNeoService extends EventEmitter {
       if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
         console.log('💡 Authentication failed. Please verify:');
         console.log('   - KOTAK_CONSUMER_KEY is correct');
+        console.log('   - KOTAK_CONSUMER_SECRET is correct');
         console.log('   - KOTAK_MOBILE_NUMBER is correct (without +91 prefix)');
         console.log('   - KOTAK_PASSWORD is correct');
         console.log('   - Your Kotak Neo account is active and has API access');
@@ -158,11 +162,14 @@ export class KotakNeoService extends EventEmitter {
 
       console.log('📤 Session payload:', { userId: this.userId, mpin: '***' });
 
+      // Create Basic Auth token using consumer key and secret
+      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
+
       const sessionResponse = await fetch(`${this.baseUrl}/session/1.0/session/2FA/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'apikey': this.consumerKey,
+          'Authorization': `Basic ${basicAuthToken}`,
           'accept': '*/*'
         },
         body: JSON.stringify(sessionPayload)
@@ -598,10 +605,10 @@ export class KotakNeoService extends EventEmitter {
     
     if (token && token !== 'basic_session') {
       headers['Authorization'] = `Bearer ${token}`;
-    }
-    
-    if (this.consumerKey) {
-      headers['apikey'] = this.consumerKey;
+    } else if (this.consumerKey && this.consumerSecret) {
+      // Use Basic Auth with consumer key and secret for authenticated requests
+      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
+      headers['Authorization'] = `Basic ${basicAuthToken}`;
     }
 
     // Add Neo Finkey if available
