@@ -3,7 +3,6 @@ import { Brain, Wifi, WifiOff, Activity, Key, CheckCircle, AlertCircle } from 'l
 import { useSocket } from '../contexts/SocketContext';
 import { useTrading } from '../contexts/TradingContext';
 import { useApi } from '../contexts/ApiContext';
-import { OTPModal } from './OTPModal';
 
 export const Header: React.FC = () => {
   const { connected, marketData } = useSocket();
@@ -12,7 +11,6 @@ export const Header: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [gptTimer, setGptTimer] = useState(state.gptInterval);
   const [authStatus, setAuthStatus] = useState<any>(null);
-  const [showOTPModal, setShowOTPModal] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -28,11 +26,6 @@ export const Header: React.FC = () => {
         const response = await api.get('/kotak/auth-status');
         if (response.data.success) {
           setAuthStatus(response.data);
-          
-          // Show OTP modal if OTP is required
-          if (response.data.otpStatus?.otpRequired && !response.data.canTrade) {
-            setShowOTPModal(true);
-          }
         }
       } catch (error) {
         console.error('Failed to fetch auth status:', error);
@@ -103,117 +96,86 @@ export const Header: React.FC = () => {
     }
   };
 
-  const handleOTPSuccess = () => {
-    setShowOTPModal(false);
-    // Refresh auth status
-    setTimeout(async () => {
-      try {
-        const response = await api.get('/kotak/auth-status');
-        if (response.data.success) {
-          setAuthStatus(response.data);
-        }
-      } catch (error) {
-        console.error('Failed to refresh auth status:', error);
-      }
-    }, 1000);
-  };
-
   const { price, change, changePercent } = getLTPDisplay();
   const isPositive = change >= 0;
 
   return (
-    <>
-      <header className="bg-gray-800 border-b border-gray-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-6">
+    <header className="bg-gray-800 border-b border-gray-700 px-6 py-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-6">
+          <div className="flex items-center space-x-2">
+            <Brain className="w-8 h-8 text-blue-400" />
+            <h1 className="text-2xl font-bold text-white">FAi-3.0</h1>
+            <span className="text-sm text-gray-400">Trading System</span>
+          </div>
+          
+          <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">
-              <Brain className="w-8 h-8 text-blue-400" />
-              <h1 className="text-2xl font-bold text-white">FAi-3.0</h1>
-              <span className="text-sm text-gray-400">Trading System</span>
+              {connected ? (
+                <Wifi className="w-5 h-5 text-green-400" />
+              ) : (
+                <WifiOff className="w-5 h-5 text-red-400" />
+              )}
+              <span className="text-sm text-gray-300">
+                {connected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              {getAuthStatusIcon()}
+              <span className="text-sm text-gray-300">
+                {getAuthStatusText()}
+              </span>
             </div>
             
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                {connected ? (
-                  <Wifi className="w-5 h-5 text-green-400" />
-                ) : (
-                  <WifiOff className="w-5 h-5 text-red-400" />
-                )}
-                <span className="text-sm text-gray-300">
-                  {connected ? 'Connected' : 'Disconnected'}
-                </span>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                {getAuthStatusIcon()}
-                <span className="text-sm text-gray-300">
-                  {getAuthStatusText()}
-                </span>
-                {authStatus?.otpStatus?.otpRequired && !authStatus.canTrade && (
-                  <button
-                    onClick={() => setShowOTPModal(true)}
-                    className="ml-2 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded"
-                  >
-                    Enter OTP
-                  </button>
-                )}
-              </div>
-              
-              <div className="text-sm text-gray-300">
-                IST: {formatTime(currentTime)}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-6">
-            <div className="text-center">
-              <div className="text-sm text-gray-400">LTP</div>
-              <div className="flex items-center space-x-2">
-                <span className="text-xl font-bold text-white">
-                  {price.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-                <span className={`text-sm ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-                  {isPositive ? '+' : ''}{change.toFixed(2)} ({changePercent.toFixed(2)}%)
-                </span>
-              </div>
-              <div className="text-xs text-gray-500">{state.selectedIndex}</div>
-            </div>
-
-            {state.isTrading && (
-              <div className="text-center">
-                <div className="text-sm text-gray-400">GPT Analysis</div>
-                <div className="flex items-center space-x-2">
-                  <Activity className="w-4 h-4 text-blue-400" />
-                  <span className="text-lg font-mono text-blue-400">
-                    {gptTimer}s
-                  </span>
-                </div>
-                <div className="text-xs text-gray-500">Next Analysis</div>
-              </div>
-            )}
-
-            <div className="text-center">
-              <div className="text-sm text-gray-400">P&L</div>
-              <div className={`text-xl font-bold ${state.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                ₹{state.pnl.toLocaleString('en-IN')}
-              </div>
-            </div>
-
-            <div className="text-center">
-              <div className="text-sm text-gray-400">Wallet</div>
-              <div className="text-xl font-bold text-white">
-                ₹{state.wallet.toLocaleString('en-IN')}
-              </div>
+            <div className="text-sm text-gray-300">
+              IST: {formatTime(currentTime)}
             </div>
           </div>
         </div>
-      </header>
 
-      <OTPModal
-        isOpen={showOTPModal}
-        onClose={() => setShowOTPModal(false)}
-        onSuccess={handleOTPSuccess}
-      />
-    </>
+        <div className="flex items-center space-x-6">
+          <div className="text-center">
+            <div className="text-sm text-gray-400">LTP</div>
+            <div className="flex items-center space-x-2">
+              <span className="text-xl font-bold text-white">
+                {price.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              </span>
+              <span className={`text-sm ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+                {isPositive ? '+' : ''}{change.toFixed(2)} ({changePercent.toFixed(2)}%)
+              </span>
+            </div>
+            <div className="text-xs text-gray-500">{state.selectedIndex}</div>
+          </div>
+
+          {state.isTrading && (
+            <div className="text-center">
+              <div className="text-sm text-gray-400">GPT Analysis</div>
+              <div className="flex items-center space-x-2">
+                <Activity className="w-4 h-4 text-blue-400" />
+                <span className="text-lg font-mono text-blue-400">
+                  {gptTimer}s
+                </span>
+              </div>
+              <div className="text-xs text-gray-500">Next Analysis</div>
+            </div>
+          )}
+
+          <div className="text-center">
+            <div className="text-sm text-gray-400">P&L</div>
+            <div className={`text-xl font-bold ${state.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              ₹{state.pnl.toLocaleString('en-IN')}
+            </div>
+          </div>
+
+          <div className="text-center">
+            <div className="text-sm text-gray-400">Wallet</div>
+            <div className="text-xl font-bold text-white">
+              ₹{state.wallet.toLocaleString('en-IN')}
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
   );
 };
