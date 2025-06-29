@@ -26,6 +26,17 @@ export class KotakNeoService extends EventEmitter {
     this.isLoggedIn = false;
     this.neoFinkey = null;
     this.oauthAccessToken = null;
+    
+    // OTP Management
+    this.otpGenerated = false;
+    this.otpGeneratedAt = null;
+    this.otpExpiry = 5 * 60 * 1000; // 5 minutes in milliseconds
+    this.pendingOTPValidation = false;
+    this.tokenExpiry = 86400 * 1000; // 24 hours in milliseconds
+    this.tokenGeneratedAt = null;
+    
+    // Auto-refresh timer
+    this.tokenRefreshTimer = null;
   }
 
   async initialize() {
@@ -51,9 +62,10 @@ export class KotakNeoService extends EventEmitter {
         this.mobileNumber = '+91' + this.mobileNumber;
       }
 
-      await this.loginWithOTP();
+      await this.startLoginProcess();
       await this.downloadMasterData();
       this.connectWebSocket();
+      this.setupTokenRefreshTimer();
       console.log('✅ Kotak Neo Service initialized successfully');
     } catch (error) {
       console.error('❌ Failed to initialize Kotak Neo Service:', error.message);
@@ -61,9 +73,9 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async loginWithOTP() {
+  async startLoginProcess() {
     try {
-      console.log('🔐 Step 1: Attempting Kotak Neo login to get view token...');
+      console.log('🔐 Starting Kotak Neo login process...');
       
       // Step 1: Get View Token
       const viewToken = await this.getViewToken();
@@ -72,18 +84,29 @@ export class KotakNeoService extends EventEmitter {
       }
 
       // Step 2: Generate OTP
-      console.log('📱 Step 2: Generating OTP...');
-      await this.generateOTP();
-
-      // Step 3: Wait for user to provide OTP (for now, we'll try without OTP)
-      console.log('⚠️ OTP-based login requires manual OTP input. Continuing with view token only...');
+      console.log('📱 Generating OTP...');
+      const otpGenerated = await this.generateOTP();
       
-      this.accessToken = this.viewToken;
-      this.isLoggedIn = true;
-      console.log('✅ Kotak Neo authentication completed with view token');
+      if (otpGenerated) {
+        console.log('✅ OTP sent successfully! Please check your mobile and email.');
+        console.log('📞 Waiting for OTP input...');
+        console.log('💡 Use the API endpoint POST /api/kotak/validate-otp with {"otp": "your_otp"} to complete login');
+        
+        this.pendingOTPValidation = true;
+        this.emit('otp_required', {
+          message: 'OTP sent to your registered mobile and email',
+          expiresIn: this.otpExpiry / 1000 // seconds
+        });
+      } else {
+        console.log('⚠️ OTP generation failed. Continuing with view token only...');
+        this.accessToken = this.viewToken;
+        this.isLoggedIn = true;
+        this.tokenGeneratedAt = Date.now();
+      }
+
       return true;
     } catch (error) {
-      console.error('❌ Kotak Neo login failed:', error);
+      console.error('❌ Login process failed:', error);
       throw error;
     }
   }
@@ -109,7 +132,6 @@ export class KotakNeoService extends EventEmitter {
 
       const loginData = await loginResponse.json();
       console.log('📋 Login response status:', loginResponse.status);
-      console.log('📋 Login response:', JSON.stringify(loginData, null, 2));
 
       // Check for HTTP errors first
       if (!loginResponse.ok) {
@@ -125,13 +147,12 @@ export class KotakNeoService extends EventEmitter {
 
       // Check for missing data field
       if (!loginData.data) {
-        console.error('❌ Login response structure:', Object.keys(loginData));
         throw new Error(`Login failed: No data in response. Full response: ${JSON.stringify(loginData)}`);
       }
 
       // Extract session details
       this.viewToken = loginData.data.token;
-      this.userId = loginData.data.ucc; // UCC is the user ID in some cases
+      this.userId = loginData.data.ucc;
       this.ucc = loginData.data.ucc || this.ucc;
       this.sid = loginData.data.sid;
       this.rid = loginData.data.rid;
@@ -156,17 +177,8 @@ export class KotakNeoService extends EventEmitter {
     } catch (error) {
       console.error('❌ Failed to get view token:', error);
       
-      // Provide specific guidance based on error type
       if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
-        console.log('💡 Authentication failed. Please verify:');
-        console.log('   - KOTAK_ACCESS_TOKEN is correct (get from OAuth2 section in developer portal)');
-        console.log('   - KOTAK_MOBILE_NUMBER includes +91 country code');
-        console.log('   - KOTAK_PASSWORD is correct');
-        console.log('   - Your Kotak Neo account is active and has API access');
-      } else if (error.message.includes('HTTP 400') || error.message.includes('Bad Request')) {
-        console.log('💡 Bad request. Please verify:');
-        console.log('   - Mobile number format: +919666803027');
-        console.log('   - Password does not contain special characters that need encoding');
+        console.log('💡 Authentication failed. Please verify your credentials in .env file');
       }
       
       throw error;
@@ -185,8 +197,6 @@ export class KotakNeoService extends EventEmitter {
         isWhitelisted: true
       };
 
-      console.log('📤 OTP payload:', otpPayload);
-
       const otpResponse = await fetch(`${this.baseUrl}/login/1.0/login/otp/generate`, {
         method: 'POST',
         headers: { 
@@ -199,7 +209,6 @@ export class KotakNeoService extends EventEmitter {
 
       const otpData = await otpResponse.json();
       console.log('📋 OTP response status:', otpResponse.status);
-      console.log('📋 OTP response:', JSON.stringify(otpData, null, 2));
 
       if (!otpResponse.ok) {
         console.log(`⚠️ OTP generation failed: HTTP ${otpResponse.status}`);
@@ -214,6 +223,19 @@ export class KotakNeoService extends EventEmitter {
 
       if (otpData.data) {
         console.log(`📱 OTP sent to: ${otpData.data.mobile} and ${otpData.data.email}`);
+        this.otpGenerated = true;
+        this.otpGeneratedAt = Date.now();
+        
+        // Set OTP expiry timer
+        setTimeout(() => {
+          if (this.pendingOTPValidation) {
+            console.log('⏰ OTP expired. Please regenerate OTP.');
+            this.otpGenerated = false;
+            this.otpGeneratedAt = null;
+            this.emit('otp_expired');
+          }
+        }, this.otpExpiry);
+        
         return true;
       }
 
@@ -224,8 +246,23 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async validateOTPAndGetSessionToken(otp) {
+  async validateOTP(otp) {
     try {
+      if (!this.pendingOTPValidation) {
+        throw new Error('No pending OTP validation. Please generate OTP first.');
+      }
+
+      if (!this.otpGenerated) {
+        throw new Error('OTP has expired. Please regenerate OTP.');
+      }
+
+      // Check if OTP is expired
+      if (Date.now() - this.otpGeneratedAt > this.otpExpiry) {
+        this.otpGenerated = false;
+        this.otpGeneratedAt = null;
+        throw new Error('OTP has expired. Please regenerate OTP.');
+      }
+
       if (!this.userId || !this.viewToken || !this.sid) {
         throw new Error('Missing required data for OTP validation');
       }
@@ -235,7 +272,7 @@ export class KotakNeoService extends EventEmitter {
         otp: otp
       };
 
-      console.log('📤 Session validation payload:', { userId: this.userId, otp: '***' });
+      console.log('📤 Validating OTP...');
 
       const sessionResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
@@ -250,16 +287,15 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const sessionData = await sessionResponse.json();
-      console.log('📋 Session response status:', sessionResponse.status);
-      console.log('📋 Session response:', JSON.stringify(sessionData, null, 2));
+      console.log('📋 OTP validation response status:', sessionResponse.status);
 
       if (!sessionResponse.ok) {
-        throw new Error(`Session validation failed: HTTP ${sessionResponse.status}`);
+        throw new Error(`OTP validation failed: HTTP ${sessionResponse.status} - ${JSON.stringify(sessionData)}`);
       }
 
       if (sessionData.fault) {
         const errorMessage = sessionData.fault.message || sessionData.fault.description;
-        throw new Error(`Session validation failed: ${errorMessage}`);
+        throw new Error(`OTP validation failed: ${errorMessage}`);
       }
 
       if (sessionData.data && sessionData.data.token) {
@@ -268,15 +304,127 @@ export class KotakNeoService extends EventEmitter {
         this.sid = sessionData.data.sid || this.sid;
         this.rid = sessionData.data.rid || this.rid;
         this.hsServerId = sessionData.data.hsServerId || this.hsServerId;
-        console.log('✅ Session token generated successfully');
-        return true;
+        
+        // Reset OTP flags
+        this.pendingOTPValidation = false;
+        this.otpGenerated = false;
+        this.otpGeneratedAt = null;
+        this.isLoggedIn = true;
+        this.tokenGeneratedAt = Date.now();
+        
+        console.log('✅ OTP validated successfully! Trade token generated.');
+        this.emit('login_success', {
+          message: 'Login completed successfully',
+          canTrade: true
+        });
+        
+        return {
+          success: true,
+          message: 'OTP validated successfully',
+          canTrade: true
+        };
       } else {
         throw new Error('Session token not found in response');
       }
     } catch (error) {
-      console.error('❌ Session validation failed:', error);
+      console.error('❌ OTP validation failed:', error);
+      
+      // If OTP is invalid, allow regeneration
+      if (error.message.includes('Invalid OTP') || error.message.includes('OTP')) {
+        this.otpGenerated = false;
+        this.otpGeneratedAt = null;
+      }
+      
       throw error;
     }
+  }
+
+  async regenerateOTP() {
+    try {
+      console.log('🔄 Regenerating OTP...');
+      
+      // Reset OTP flags
+      this.otpGenerated = false;
+      this.otpGeneratedAt = null;
+      this.pendingOTPValidation = false;
+      
+      // Generate new OTP
+      const otpGenerated = await this.generateOTP();
+      
+      if (otpGenerated) {
+        this.pendingOTPValidation = true;
+        console.log('✅ New OTP generated successfully!');
+        this.emit('otp_regenerated', {
+          message: 'New OTP sent to your registered mobile and email',
+          expiresIn: this.otpExpiry / 1000
+        });
+        
+        return {
+          success: true,
+          message: 'New OTP sent successfully',
+          expiresIn: this.otpExpiry / 1000
+        };
+      } else {
+        throw new Error('Failed to generate new OTP');
+      }
+    } catch (error) {
+      console.error('❌ OTP regeneration failed:', error);
+      throw error;
+    }
+  }
+
+  setupTokenRefreshTimer() {
+    // Clear existing timer
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+    }
+
+    // Set timer to refresh token before expiry (refresh 1 hour before expiry)
+    const refreshTime = this.tokenExpiry - (60 * 60 * 1000); // 23 hours
+    
+    this.tokenRefreshTimer = setTimeout(async () => {
+      try {
+        console.log('🔄 Token expiring soon. Starting refresh process...');
+        await this.refreshTokens();
+      } catch (error) {
+        console.error('❌ Token refresh failed:', error);
+        this.emit('token_refresh_failed', error);
+      }
+    }, refreshTime);
+
+    console.log(`⏰ Token refresh scheduled in ${refreshTime / 1000 / 60 / 60} hours`);
+  }
+
+  async refreshTokens() {
+    try {
+      console.log('🔄 Refreshing authentication tokens...');
+      
+      // Start fresh login process
+      this.isLoggedIn = false;
+      this.accessToken = null;
+      this.viewToken = null;
+      this.tradeToken = null;
+      
+      await this.startLoginProcess();
+      
+      console.log('✅ Tokens refreshed successfully');
+      this.emit('tokens_refreshed');
+      
+      return true;
+    } catch (error) {
+      console.error('❌ Token refresh failed:', error);
+      throw error;
+    }
+  }
+
+  getOTPStatus() {
+    return {
+      otpRequired: this.pendingOTPValidation,
+      otpGenerated: this.otpGenerated,
+      otpExpired: this.otpGenerated && (Date.now() - this.otpGeneratedAt > this.otpExpiry),
+      timeRemaining: this.otpGenerated ? Math.max(0, this.otpExpiry - (Date.now() - this.otpGeneratedAt)) : 0,
+      canTrade: this.canTrade()
+    };
   }
 
   async downloadMasterData() {
@@ -326,7 +474,6 @@ export class KotakNeoService extends EventEmitter {
       }
     } catch (error) {
       console.error('❌ Failed to download master data:', error);
-      // Initialize empty master data to prevent crashes
       this.masterData = [];
     }
   }
@@ -408,7 +555,6 @@ export class KotakNeoService extends EventEmitter {
       this.websocket.close();
     }
 
-    // Use the correct WebSocket URL format
     const wsUrl = `${this.wsUrl}/?sid=${this.sid}${this.hsServerId ? `&hsServerId=${this.hsServerId}` : ''}`;
     console.log('🔌 Connecting to WebSocket:', wsUrl);
 
@@ -417,8 +563,6 @@ export class KotakNeoService extends EventEmitter {
     this.websocket.on('open', () => {
       console.log('✅ WebSocket connected to Kotak Neo');
       this.emit('websocket_connected');
-      
-      // Subscribe to default indices
       this.subscribeToDefaultIndices();
     });
 
@@ -573,13 +717,11 @@ export class KotakNeoService extends EventEmitter {
   async placeOrder(orderDetails) {
     try {
       if (!this.tradeToken) {
-        throw new Error('Trade token not available. Cannot place orders without proper authentication.');
+        throw new Error('Trade token not available. Please complete OTP validation to enable trading.');
       }
 
-      // Use trade token for order placement
       const headers = this.getAuthHeaders(true);
       
-      // Map order details to Kotak Neo format
       const kotakOrder = {
         am: orderDetails.am || "NO",
         dq: orderDetails.dq || "0",
@@ -618,62 +760,18 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async getMargins() {
-    try {
-      const response = await fetch(`${this.baseUrl}/Margins/2.0/margins/equity`, {
-        method: 'GET',
-        headers: this.getAuthHeaders()
-      });
-
-      const data = await response.json();
-      
-      if (data.fault) {
-        console.error('❌ Margins API error:', data.fault.message || data.fault.description);
-        return null;
-      }
-      
-      return data.data || null;
-    } catch (error) {
-      console.error('❌ Failed to get margins:', error);
-      return null;
-    }
-  }
-
-  async getLimits() {
-    try {
-      const response = await fetch(`${this.baseUrl}/Limits/1.0/limits/rms-limits`, {
-        method: 'GET',
-        headers: this.getAuthHeaders()
-      });
-
-      const data = await response.json();
-      
-      if (data.fault) {
-        console.error('❌ Limits API error:', data.fault.message || data.fault.description);
-        return null;
-      }
-      
-      return data.data || null;
-    } catch (error) {
-      console.error('❌ Failed to get limits:', error);
-      return null;
-    }
-  }
-
   getAuthHeaders(useTradeToken = false) {
     const headers = {
       'Content-Type': 'application/json',
       'accept': '*/*'
     };
 
-    // Use trade token for trading operations, view token for market data
     const token = useTradeToken && this.tradeToken ? this.tradeToken : this.accessToken;
     
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    // Add Neo Finkey if available
     if (this.neoFinkey) {
       headers['neo-fin-key'] = this.neoFinkey;
     }
@@ -682,7 +780,6 @@ export class KotakNeoService extends EventEmitter {
   }
 
   getInstrumentToken(symbol) {
-    // For indices, use predefined tokens as per documentation
     const indexTokens = {
       'NIFTY': 'Nifty 50',
       'BANKNIFTY': 'Nifty Bank',
@@ -752,5 +849,15 @@ export class KotakNeoService extends EventEmitter {
       item.pDisplaySymbol?.toLowerCase().includes(searchTerm) ||
       item.pTrdSymbol?.toLowerCase().includes(searchTerm)
     );
+  }
+
+  // Cleanup method
+  cleanup() {
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+    }
+    if (this.websocket) {
+      this.websocket.close();
+    }
   }
 }

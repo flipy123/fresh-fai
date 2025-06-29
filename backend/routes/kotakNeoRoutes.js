@@ -67,9 +67,66 @@ kotakNeoRouter.post('/subscribe', async (req, res) => {
 // Get authentication status
 kotakNeoRouter.get('/auth-status', (req, res) => {
   const isAuthenticated = req.kotakService.isAuthenticated();
+  const canTrade = req.kotakService.canTrade();
+  const otpStatus = req.kotakService.getOTPStatus();
+  
   res.json({ 
     success: true, 
     authenticated: isAuthenticated,
+    canTrade: canTrade,
+    otpStatus: otpStatus,
     timestamp: new Date().toISOString()
   });
+});
+
+// Validate OTP
+kotakNeoRouter.post('/validate-otp', async (req, res) => {
+  try {
+    const { otp } = req.body;
+    
+    if (!otp) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'OTP is required' 
+      });
+    }
+
+    const result = await req.kotakService.validateOTP(otp);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Regenerate OTP
+kotakNeoRouter.post('/regenerate-otp', async (req, res) => {
+  try {
+    const result = await req.kotakService.regenerateOTP();
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get OTP status
+kotakNeoRouter.get('/otp-status', (req, res) => {
+  try {
+    const otpStatus = req.kotakService.getOTPStatus();
+    res.json({ success: true, data: otpStatus });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Refresh tokens manually
+kotakNeoRouter.post('/refresh-tokens', async (req, res) => {
+  try {
+    await req.kotakService.refreshTokens();
+    res.json({ 
+      success: true, 
+      message: 'Tokens refreshed successfully' 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
