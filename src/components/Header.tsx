@@ -11,6 +11,7 @@ export const Header: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [gptTimer, setGptTimer] = useState(state.gptInterval);
   const [authStatus, setAuthStatus] = useState<any>(null);
+  const [currentMarketData, setCurrentMarketData] = useState<any>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -38,6 +39,29 @@ export const Header: React.FC = () => {
   }, [api]);
 
   useEffect(() => {
+    const fetchMarketData = async () => {
+      try {
+        const response = await api.get(`/kotak/market-data/${state.selectedIndex}`);
+        if (response.data.success && response.data.data) {
+          setCurrentMarketData(response.data.data);
+        }
+      } catch (error) {
+        console.error('Failed to fetch market data:', error);
+      }
+    };
+
+    fetchMarketData();
+    const interval = setInterval(fetchMarketData, 2000);
+    return () => clearInterval(interval);
+  }, [api, state.selectedIndex]);
+
+  useEffect(() => {
+    if (marketData) {
+      setCurrentMarketData(marketData);
+    }
+  }, [marketData]);
+
+  useEffect(() => {
     if (state.isTrading) {
       const gptTimerInterval = setInterval(() => {
         setGptTimer((prev) => {
@@ -60,11 +84,11 @@ export const Header: React.FC = () => {
   };
 
   const getLTPDisplay = () => {
-    if (marketData && marketData.token) {
+    if (currentMarketData) {
       return {
-        price: marketData.ltp || 0,
-        change: marketData.change || 0,
-        changePercent: marketData.changePercent || 0
+        price: currentMarketData.ltp || 0,
+        change: currentMarketData.change || 0,
+        changePercent: currentMarketData.changePercent || 0
       };
     }
     return { price: 0, change: 0, changePercent: 0 };
@@ -139,11 +163,13 @@ export const Header: React.FC = () => {
             <div className="text-sm text-gray-400">LTP</div>
             <div className="flex items-center space-x-2">
               <span className="text-xl font-bold text-white">
-                {price.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                {price > 0 ? price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
               </span>
-              <span className={`text-sm ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-                {isPositive ? '+' : ''}{change.toFixed(2)} ({changePercent.toFixed(2)}%)
-              </span>
+              {price > 0 && (
+                <span className={`text-sm ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+                  {isPositive ? '+' : ''}{change.toFixed(2)} ({changePercent.toFixed(2)}%)
+                </span>
+              )}
             </div>
             <div className="text-xs text-gray-500">{state.selectedIndex}</div>
           </div>

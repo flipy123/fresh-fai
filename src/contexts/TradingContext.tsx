@@ -100,6 +100,8 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
     if (!socket) return;
 
     const handleDataUpdate = (data: any) => {
+      console.log('📊 Data update received:', data);
+      
       if (data.positions) {
         dispatch({ type: 'UPDATE_POSITIONS', payload: data.positions });
         
@@ -112,6 +114,10 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
       
       if (data.orders) {
         dispatch({ type: 'UPDATE_ORDERS', payload: data.orders });
+      }
+      
+      if (data.wallet) {
+        dispatch({ type: 'UPDATE_WALLET', payload: data.wallet });
       }
     };
 
@@ -132,21 +138,32 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
+        console.log('🔄 Fetching initial data...');
+        
         // Fetch positions
         const positionsResponse = await api.get('/kotak/positions');
         if (positionsResponse.data.success) {
+          console.log('📊 Positions fetched:', positionsResponse.data.data);
           dispatch({ type: 'UPDATE_POSITIONS', payload: positionsResponse.data.data });
+          
+          // Calculate P&L from positions
+          const totalPnl = positionsResponse.data.data.reduce((sum: number, pos: any) => {
+            return sum + (parseFloat(pos.pnl) || 0);
+          }, 0);
+          dispatch({ type: 'UPDATE_PNL', payload: totalPnl });
         }
 
         // Fetch orders
         const ordersResponse = await api.get('/kotak/orders');
         if (ordersResponse.data.success) {
+          console.log('📋 Orders fetched:', ordersResponse.data.data);
           dispatch({ type: 'UPDATE_ORDERS', payload: ordersResponse.data.data });
         }
 
         // Fetch wallet balance
         const walletResponse = await api.get('/kotak/wallet');
         if (walletResponse.data.success) {
+          console.log('💰 Wallet fetched:', walletResponse.data.data);
           dispatch({ type: 'UPDATE_WALLET', payload: walletResponse.data.data });
         }
       } catch (error) {

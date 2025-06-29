@@ -53,6 +53,17 @@ kotakNeoRouter.get('/wallet', async (req, res) => {
   }
 });
 
+// Get market data for symbol
+kotakNeoRouter.get('/market-data/:symbol', async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const marketData = req.kotakService.getMarketDataForSymbol(symbol);
+    res.json({ success: true, data: marketData });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Place order
 kotakNeoRouter.post('/orders', async (req, res) => {
   try {

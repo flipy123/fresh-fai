@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Play, Square, Settings, RotateCcw } from 'lucide-react';
 import { useTrading } from '../contexts/TradingContext';
 import { useApi } from '../contexts/ApiContext';
@@ -6,6 +6,23 @@ import { useApi } from '../contexts/ApiContext';
 export const ControlPanel: React.FC = () => {
   const { state, dispatch } = useTrading();
   const { api } = useApi();
+  const [availableIndices, setAvailableIndices] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchAvailableIndices = async () => {
+      try {
+        const response = await api.get('/kotak/indices');
+        if (response.data.success) {
+          setAvailableIndices(response.data.data);
+          console.log('📊 Available indices:', response.data.data);
+        }
+      } catch (error) {
+        console.error('Failed to fetch available indices:', error);
+      }
+    };
+
+    fetchAvailableIndices();
+  }, [api]);
 
   const handleToggleTrading = () => {
     dispatch({ type: 'SET_TRADING_STATUS', payload: !state.isTrading });
@@ -63,10 +80,20 @@ export const ControlPanel: React.FC = () => {
               disabled={state.isTrading}
               className="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 focus:border-blue-400 focus:outline-none"
             >
-              <option value="NIFTY">NIFTY</option>
-              <option value="BANKNIFTY">BANK NIFTY</option>
-              <option value="FINNIFTY">FIN NIFTY</option>
-              <option value="MIDCPNIFTY">MIDCAP NIFTY</option>
+              {availableIndices.length > 0 ? (
+                availableIndices.map((index) => (
+                  <option key={index.symbol} value={index.symbol}>
+                    {index.displayName}
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="NIFTY">NIFTY 50</option>
+                  <option value="BANKNIFTY">BANK NIFTY</option>
+                  <option value="FINNIFTY">FIN NIFTY</option>
+                  <option value="MIDCPNIFTY">MIDCAP NIFTY</option>
+                </>
+              )}
             </select>
           </div>
 

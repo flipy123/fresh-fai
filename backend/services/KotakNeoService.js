@@ -6,15 +6,15 @@ export class KotakNeoService extends EventEmitter {
   constructor() {
     super();
     this.baseUrl = 'https://gw-napi.kotaksecurities.com';
-    this.wsUrl = 'wss://mlhsm.kotaksecurities.com'; // Correct HSM URL
-    this.hsiUrl = 'wss://mis.kotaksecurities.com/realtime'; // HSI URL for orders
+    this.wsUrl = 'wss://mlhsm.kotaksecurities.com';
+    this.hsiUrl = 'wss://mis.kotaksecurities.com/realtime';
     this.accessToken = null;
     this.sid = null;
     this.rid = null;
     this.hsServerId = null;
     this.websocket = null;
     this.hsiWebsocket = null;
-    this.masterData = null;
+    this.masterData = [];
     this.subscribedTokens = new Set();
     this.userId = null;
     this.mobileNumber = null;
@@ -28,14 +28,14 @@ export class KotakNeoService extends EventEmitter {
     this.isLoggedIn = false;
     this.neoFinkey = null;
     this.oauthAccessToken = null;
-    this.dataCenter = 'gdc'; // Default data center
+    this.dataCenter = 'gdc';
     
     // OTP Management
     this.otpGenerated = false;
     this.otpGeneratedAt = null;
-    this.otpExpiry = 5 * 60 * 1000; // 5 minutes in milliseconds
+    this.otpExpiry = 5 * 60 * 1000;
     this.pendingOTPValidation = false;
-    this.tokenExpiry = 86400 * 1000; // 24 hours in milliseconds
+    this.tokenExpiry = 86400 * 1000;
     this.tokenGeneratedAt = null;
     
     // Auto-refresh timer
@@ -50,14 +50,16 @@ export class KotakNeoService extends EventEmitter {
     
     // Data refresh intervals
     this.dataRefreshInterval = null;
+    
+    // Market data storage
+    this.marketDataCache = new Map();
+    this.lastPriceUpdate = new Map();
   }
 
   async initialize() {
     try {
       if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD || !process.env.KOTAK_ACCESS_TOKEN) {
         console.log('⚠️ Kotak Neo credentials not configured. Please update your .env file with valid credentials.');
-        console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD, KOTAK_ACCESS_TOKEN');
-        console.log('💡 Get your ACCESS_TOKEN from the Kotak Neo developer portal OAuth2 section');
         return;
       }
 
@@ -70,7 +72,6 @@ export class KotakNeoService extends EventEmitter {
       this.neoFinkey = process.env.KOTAK_NEO_FINKEY;
       this.oauthAccessToken = process.env.KOTAK_ACCESS_TOKEN;
 
-      // Ensure mobile number includes country code
       if (!this.mobileNumber.startsWith('+91')) {
         this.mobileNumber = '+91' + this.mobileNumber;
       }
@@ -81,7 +82,6 @@ export class KotakNeoService extends EventEmitter {
       console.log('✅ Kotak Neo Service initialized successfully');
     } catch (error) {
       console.error('❌ Failed to initialize Kotak Neo Service:', error.message);
-      console.log('💡 Please check your Kotak Neo credentials in the .env file');
     }
   }
 
@@ -89,25 +89,20 @@ export class KotakNeoService extends EventEmitter {
     try {
       console.log('🔐 Starting Kotak Neo login process...');
       
-      // Step 1: Get View Token
       const viewToken = await this.getViewToken();
       if (!viewToken) {
         throw new Error('Failed to get view token');
       }
 
-      // Step 2: Generate OTP
       console.log('📱 Generating OTP...');
       const otpGenerated = await this.generateOTP();
       
       if (otpGenerated) {
-        console.log('✅ OTP sent successfully! Please check your mobile and email.');
-        console.log('📞 Waiting for OTP input...');
-        console.log('💡 Use the API endpoint POST /api/kotak/validate-otp with {"otp": "your_otp"} to complete login');
-        
+        console.log('✅ OTP sent successfully!');
         this.pendingOTPValidation = true;
         this.emit('otp_required', {
           message: 'OTP sent to your registered mobile and email',
-          expiresIn: this.otpExpiry / 1000 // seconds
+          expiresIn: this.otpExpiry / 1000
         });
       } else {
         console.log('⚠️ OTP generation failed. Continuing with view token only...');
@@ -131,8 +126,6 @@ export class KotakNeoService extends EventEmitter {
         password: this.password
       };
 
-      console.log('📤 Login payload:', { mobileNumber: this.mobileNumber, password: '***' });
-
       const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
         headers: { 
@@ -144,26 +137,15 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const loginData = await loginResponse.json();
-      console.log('📋 Login response status:', loginResponse.status);
 
-      // Check for HTTP errors first
-      if (!loginResponse.ok) {
-        throw new Error(`HTTP ${loginResponse.status}: ${loginResponse.statusText}. Response: ${JSON.stringify(loginData)}`);
+      if (!loginResponse.ok || loginData.fault) {
+        throw new Error(`Login failed: ${loginData.fault?.message || loginResponse.statusText}`);
       }
 
-      // Check for API fault errors
-      if (loginData.fault) {
-        const errorMessage = loginData.fault.message || loginData.fault.description || 'Authentication failed';
-        const errorCode = loginData.fault.code || 'UNKNOWN';
-        throw new Error(`Login failed [${errorCode}]: ${errorMessage}`);
-      }
-
-      // Check for missing data field
       if (!loginData.data) {
-        throw new Error(`Login failed: No data in response. Full response: ${JSON.stringify(loginData)}`);
+        throw new Error('Login failed: No data in response');
       }
 
-      // Extract session details
       this.viewToken = loginData.data.token;
       this.userId = loginData.data.ucc;
       this.ucc = loginData.data.ucc || this.ucc;
@@ -172,29 +154,22 @@ export class KotakNeoService extends EventEmitter {
       this.hsServerId = loginData.data.hsServerId;
       this.dataCenter = loginData.data.dataCenter || 'gdc';
 
-      // Decode JWT token to get actual userId
       if (this.viewToken) {
         try {
           const tokenParts = this.viewToken.split('.');
           if (tokenParts.length === 3) {
             const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
             this.userId = payload.sub || this.userId;
-            console.log('🔍 Decoded user ID from token:', this.userId);
           }
         } catch (decodeError) {
-          console.log('⚠️ Could not decode JWT token, using UCC as user ID');
+          console.log('⚠️ Could not decode JWT token');
         }
       }
 
-      console.log(`✅ View token obtained. User ID: ${this.userId}, UCC: ${this.ucc}, Data Center: ${this.dataCenter}`);
+      console.log(`✅ View token obtained. User ID: ${this.userId}, Data Center: ${this.dataCenter}`);
       return this.viewToken;
     } catch (error) {
       console.error('❌ Failed to get view token:', error);
-      
-      if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
-        console.log('💡 Authentication failed. Please verify your credentials in .env file');
-      }
-      
       throw error;
     }
   }
@@ -222,25 +197,16 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const otpData = await otpResponse.json();
-      console.log('📋 OTP response status:', otpResponse.status);
 
-      if (!otpResponse.ok) {
-        console.log(`⚠️ OTP generation failed: HTTP ${otpResponse.status}`);
-        return false;
-      }
-
-      if (otpData.fault) {
-        const errorMessage = otpData.fault.message || otpData.fault.description;
-        console.log(`⚠️ OTP generation failed: ${errorMessage}`);
+      if (!otpResponse.ok || otpData.fault) {
+        console.log(`⚠️ OTP generation failed: ${otpData.fault?.message || 'Unknown error'}`);
         return false;
       }
 
       if (otpData.data) {
-        console.log(`📱 OTP sent to: ${otpData.data.mobile} and ${otpData.data.email}`);
         this.otpGenerated = true;
         this.otpGeneratedAt = Date.now();
         
-        // Set OTP expiry timer
         setTimeout(() => {
           if (this.pendingOTPValidation) {
             console.log('⏰ OTP expired. Please regenerate OTP.');
@@ -262,31 +228,20 @@ export class KotakNeoService extends EventEmitter {
 
   async validateOTP(otp) {
     try {
-      if (!this.pendingOTPValidation) {
-        throw new Error('No pending OTP validation. Please generate OTP first.');
+      if (!this.pendingOTPValidation || !this.otpGenerated) {
+        throw new Error('No pending OTP validation or OTP expired');
       }
 
-      if (!this.otpGenerated) {
-        throw new Error('OTP has expired. Please regenerate OTP.');
-      }
-
-      // Check if OTP is expired
       if (Date.now() - this.otpGeneratedAt > this.otpExpiry) {
         this.otpGenerated = false;
         this.otpGeneratedAt = null;
         throw new Error('OTP has expired. Please regenerate OTP.');
       }
 
-      if (!this.userId || !this.viewToken || !this.sid) {
-        throw new Error('Missing required data for OTP validation');
-      }
-
       const sessionPayload = {
         userId: this.userId,
         otp: otp
       };
-
-      console.log('📤 Validating OTP...');
 
       const sessionResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
@@ -301,15 +256,9 @@ export class KotakNeoService extends EventEmitter {
       });
 
       const sessionData = await sessionResponse.json();
-      console.log('📋 OTP validation response status:', sessionResponse.status);
 
-      if (!sessionResponse.ok) {
-        throw new Error(`OTP validation failed: HTTP ${sessionResponse.status} - ${JSON.stringify(sessionData)}`);
-      }
-
-      if (sessionData.fault) {
-        const errorMessage = sessionData.fault.message || sessionData.fault.description;
-        throw new Error(`OTP validation failed: ${errorMessage}`);
+      if (!sessionResponse.ok || sessionData.fault) {
+        throw new Error(`OTP validation failed: ${sessionData.fault?.message || 'Unknown error'}`);
       }
 
       if (sessionData.data && sessionData.data.token) {
@@ -320,7 +269,6 @@ export class KotakNeoService extends EventEmitter {
         this.hsServerId = sessionData.data.hsServerId || this.hsServerId;
         this.dataCenter = sessionData.data.dataCenter || this.dataCenter;
         
-        // Reset OTP flags
         this.pendingOTPValidation = false;
         this.otpGenerated = false;
         this.otpGeneratedAt = null;
@@ -329,7 +277,6 @@ export class KotakNeoService extends EventEmitter {
         
         console.log('✅ OTP validated successfully! Trade token generated.');
         
-        // Connect WebSockets after successful OTP validation
         this.connectWebSockets();
         
         this.emit('login_success', {
@@ -348,7 +295,6 @@ export class KotakNeoService extends EventEmitter {
     } catch (error) {
       console.error('❌ OTP validation failed:', error);
       
-      // If OTP is invalid, allow regeneration
       if (error.message.includes('Invalid OTP') || error.message.includes('OTP')) {
         this.otpGenerated = false;
         this.otpGeneratedAt = null;
@@ -362,12 +308,10 @@ export class KotakNeoService extends EventEmitter {
     try {
       console.log('🔄 Regenerating OTP...');
       
-      // Reset OTP flags
       this.otpGenerated = false;
       this.otpGeneratedAt = null;
       this.pendingOTPValidation = false;
       
-      // Generate new OTP
       const otpGenerated = await this.generateOTP();
       
       if (otpGenerated) {
@@ -414,7 +358,6 @@ export class KotakNeoService extends EventEmitter {
     this.websocket.on('open', () => {
       console.log('✅ HSM WebSocket connected');
       
-      // Send connection message as per demo
       const connectionMsg = {
         Authorization: this.accessToken,
         Sid: this.sid,
@@ -423,7 +366,6 @@ export class KotakNeoService extends EventEmitter {
       
       this.websocket.send(JSON.stringify(connectionMsg));
       
-      // Start heartbeat
       this.heartbeatInterval = setInterval(() => {
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
           this.websocket.send(JSON.stringify({type: "ti", scrips: ""}));
@@ -468,7 +410,6 @@ export class KotakNeoService extends EventEmitter {
       this.hsiWebsocket.close();
     }
 
-    // Determine HSI URL based on data center
     let hsiUrl = this.hsiUrl;
     if (this.dataCenter === 'adc') {
       hsiUrl = 'wss://cis.kotaksecurities.com/realtime';
@@ -488,7 +429,6 @@ export class KotakNeoService extends EventEmitter {
     this.hsiWebsocket.on('open', () => {
       console.log('✅ HSI WebSocket connected');
       
-      // Send connection message for orders
       const connectionMsg = {
         type: "cn",
         Authorization: this.accessToken,
@@ -498,7 +438,6 @@ export class KotakNeoService extends EventEmitter {
       
       this.hsiWebsocket.send(JSON.stringify(connectionMsg));
       
-      // Start heartbeat for HSI
       this.hsiHeartbeatInterval = setInterval(() => {
         if (this.hsiWebsocket && this.hsiWebsocket.readyState === WebSocket.OPEN) {
           this.hsiWebsocket.send(JSON.stringify({type: "hb"}));
@@ -529,7 +468,6 @@ export class KotakNeoService extends EventEmitter {
 
   subscribeToDefaultIndices() {
     try {
-      // Subscribe to indices using the correct format from demo
       const indicesSubscription = {
         type: "ifs",
         scrips: "nse_cm|Nifty 50&nse_cm|Nifty Bank&nse_cm|Nifty Fin Service&nse_cm|NIFTY MIDCAP 100",
@@ -547,20 +485,36 @@ export class KotakNeoService extends EventEmitter {
 
   handleHSMMessage(message) {
     try {
+      console.log('📊 HSM Message received:', JSON.stringify(message));
+      
       // Handle market data messages
       if (message.type === 'mf' || message.type === 'sf') {
-        this.emit('market_data', {
+        const marketData = {
           token: message.tk,
+          symbol: message.ts || message.tk,
           ltp: parseFloat(message.lp) || 0,
           change: parseFloat(message.c) || 0,
           changePercent: parseFloat(message.cp) || 0,
           volume: parseInt(message.v) || 0,
-          timestamp: message.ft,
+          timestamp: message.ft || new Date().toISOString(),
           high: parseFloat(message.h) || 0,
           low: parseFloat(message.l) || 0,
           open: parseFloat(message.o) || 0,
           close: parseFloat(message.pc) || 0
-        });
+        };
+        
+        // Store in cache
+        this.marketDataCache.set(message.tk, marketData);
+        this.lastPriceUpdate.set(message.tk, Date.now());
+        
+        console.log(`📈 Market Data - ${marketData.symbol}: LTP=${marketData.ltp}, Change=${marketData.change}`);
+        
+        this.emit('market_data', marketData);
+      }
+      
+      // Handle connection acknowledgment
+      if (message.type === 'cn') {
+        console.log('✅ HSM Connection acknowledged');
       }
     } catch (error) {
       console.error('❌ Error handling HSM message:', error);
@@ -569,9 +523,14 @@ export class KotakNeoService extends EventEmitter {
 
   handleHSIMessage(message) {
     try {
-      // Handle order updates and other HSI messages
+      console.log('📋 HSI Message received:', JSON.stringify(message));
+      
       if (message.type === 'order_update') {
         this.emit('order_update', message);
+      }
+      
+      if (message.type === 'cn') {
+        console.log('✅ HSI Connection acknowledged');
       }
     } catch (error) {
       console.error('❌ Error handling HSI message:', error);
@@ -591,7 +550,6 @@ export class KotakNeoService extends EventEmitter {
     }
 
     try {
-      // Format tokens for subscription
       const scripsString = newTokens.map(token => `nse_cm|${token}`).join('&');
       
       const subscribeMessage = {
@@ -610,18 +568,19 @@ export class KotakNeoService extends EventEmitter {
   }
 
   startDataRefreshInterval() {
-    // Refresh positions, orders, and wallet data every 5 seconds
     this.dataRefreshInterval = setInterval(async () => {
       try {
         if (this.isAuthenticated()) {
-          const [positions, orders] = await Promise.all([
+          const [positions, orders, wallet] = await Promise.all([
             this.getPositions(),
-            this.getOrders()
+            this.getOrders(),
+            this.getWalletBalance()
           ]);
           
           this.emit('data_update', {
             positions,
             orders,
+            wallet,
             timestamp: new Date().toISOString()
           });
         }
@@ -649,7 +608,6 @@ export class KotakNeoService extends EventEmitter {
       }
 
       const data = await response.json();
-      console.log('📋 Master data paths response status:', response.status);
       
       if (data.fault) {
         throw new Error(`Master data API error: ${data.fault.message || data.fault.description}`);
@@ -658,14 +616,12 @@ export class KotakNeoService extends EventEmitter {
       if (data.data && data.data.filesPaths && Array.isArray(data.data.filesPaths)) {
         console.log(`📊 Found ${data.data.filesPaths.length} master data files`);
         
-        // Download NSE CM data for indices
         const nseCmPath = data.data.filesPaths.find(path => path.includes('nse_cm-v1.csv'));
         if (nseCmPath) {
           console.log('📥 Downloading NSE CM data...');
           await this.downloadAndParseMasterFile(nseCmPath);
         }
         
-        // Download NSE FO data for options
         const nseFoPath = data.data.filesPaths.find(path => path.includes('nse_fo.csv'));
         if (nseFoPath) {
           console.log('📥 Downloading NSE FO data...');
@@ -693,7 +649,6 @@ export class KotakNeoService extends EventEmitter {
       
       const csvData = await response.text();
       
-      // Parse CSV data
       const lines = csvData.split('\n').filter(line => line.trim());
       if (lines.length === 0) {
         console.log('⚠️ Empty CSV file');
@@ -701,7 +656,6 @@ export class KotakNeoService extends EventEmitter {
       }
       
       const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-      console.log('📋 CSV Headers:', headers);
       
       const instruments = [];
       for (let i = 1; i < lines.length; i++) {
@@ -713,7 +667,6 @@ export class KotakNeoService extends EventEmitter {
             instrument[header] = values[index] || '';
           });
           
-          // Filter for relevant instruments
           if (instrument.pSymbolName && (
             instrument.pSymbolName.includes('NIFTY') || 
             instrument.pSymbolName.includes('BANKNIFTY') ||
@@ -722,12 +675,10 @@ export class KotakNeoService extends EventEmitter {
             instrument.pInstrumentName === 'INDEX' ||
             instrument.pInstrumentName === 'OPTIDX'
           )) {
-            // Calculate proper strike price for options
             if (instrument.dStrikePrice) {
               instrument.strikePrice = parseFloat(instrument.dStrikePrice) / 100;
             }
             
-            // Convert expiry date for NSE FO
             if (instrument.lExpiryDate && fileUrl.includes('nse_fo')) {
               const epochTime = parseInt(instrument.lExpiryDate) + 315513000;
               instrument.expiryDate = new Date(epochTime * 1000);
@@ -870,8 +821,6 @@ export class KotakNeoService extends EventEmitter {
         tt: orderDetails.tt || orderDetails.transactionType
       };
 
-      console.log('📤 Placing order:', JSON.stringify(kotakOrder, null, 2));
-
       const response = await fetch(`${this.baseUrl}/Orders/2.0/quick/order/rule/ms/place`, {
         method: 'POST',
         headers: headers,
@@ -911,33 +860,10 @@ export class KotakNeoService extends EventEmitter {
     return headers;
   }
 
-  setupTokenRefreshTimer() {
-    // Clear existing timer
-    if (this.tokenRefreshTimer) {
-      clearTimeout(this.tokenRefreshTimer);
-    }
-
-    // Set timer to refresh token before expiry (refresh 1 hour before expiry)
-    const refreshTime = this.tokenExpiry - (60 * 60 * 1000); // 23 hours
-    
-    this.tokenRefreshTimer = setTimeout(async () => {
-      try {
-        console.log('🔄 Token expiring soon. Starting refresh process...');
-        await this.refreshTokens();
-      } catch (error) {
-        console.error('❌ Token refresh failed:', error);
-        this.emit('token_refresh_failed', error);
-      }
-    }, refreshTime);
-
-    console.log(`⏰ Token refresh scheduled in ${refreshTime / 1000 / 60 / 60} hours`);
-  }
-
   async refreshTokens() {
     try {
       console.log('🔄 Refreshing authentication tokens...');
       
-      // Start fresh login process
       this.isLoggedIn = false;
       this.accessToken = null;
       this.viewToken = null;
@@ -996,7 +922,9 @@ export class KotakNeoService extends EventEmitter {
       { symbol: 'MIDCPNIFTY', token: 'NIFTY MIDCAP 100', displayName: 'MIDCAP NIFTY', exchange: 'nse_cm' }
     ];
     
-    if (!this.masterData) return predefinedIndices;
+    if (!this.masterData || this.masterData.length === 0) {
+      return predefinedIndices;
+    }
     
     const indices = this.masterData
       .filter(item => item.pInstrumentName === 'INDEX')
@@ -1007,7 +935,15 @@ export class KotakNeoService extends EventEmitter {
         exchange: item.pExchange
       }));
     
-    return [...predefinedIndices, ...indices];
+    // Merge predefined with master data, avoiding duplicates
+    const allIndices = [...predefinedIndices];
+    indices.forEach(index => {
+      if (!allIndices.find(existing => existing.symbol === index.symbol)) {
+        allIndices.push(index);
+      }
+    });
+    
+    return allIndices;
   }
 
   isAuthenticated() {
@@ -1018,26 +954,13 @@ export class KotakNeoService extends EventEmitter {
     return this.isAuthenticated() && !!this.tradeToken;
   }
 
-  getInstrumentDetails(token) {
-    if (!this.masterData) return null;
-    return this.masterData.find(item => 
-      item.pToken === token || 
-      item.pTrdSymbol === token
-    );
-  }
-
-  searchInstruments(query) {
-    if (!this.masterData) return [];
+  getMarketDataForSymbol(symbol) {
+    const token = this.getInstrumentToken(symbol);
+    if (!token) return null;
     
-    const searchTerm = query.toLowerCase();
-    return this.masterData.filter(item => 
-      item.pSymbolName?.toLowerCase().includes(searchTerm) ||
-      item.pDisplaySymbol?.toLowerCase().includes(searchTerm) ||
-      item.pTrdSymbol?.toLowerCase().includes(searchTerm)
-    );
+    return this.marketDataCache.get(token) || null;
   }
 
-  // Cleanup method
   cleanup() {
     if (this.tokenRefreshTimer) {
       clearTimeout(this.tokenRefreshTimer);

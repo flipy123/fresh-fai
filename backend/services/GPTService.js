@@ -5,6 +5,11 @@ export class GPTService {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openrouterApiKey = process.env.OPENROUTER_API_KEY;
     this.tradeMemory = new Map();
+    
+    // Debug API keys
+    console.log('🔑 GPT Service initialized:');
+    console.log('  - OpenAI API Key:', this.openaiApiKey ? '✅ Configured' : '❌ Missing');
+    console.log('  - OpenRouter API Key:', this.openrouterApiKey ? '✅ Configured' : '❌ Missing');
   }
 
   async sendToGPT(marketData, provider = 'openai') {
@@ -34,6 +39,8 @@ export class GPTService {
     }
 
     try {
+      console.log('🤖 Calling OpenAI API...');
+      
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -60,6 +67,7 @@ export class GPTService {
         throw new Error(`OpenAI API Error: ${data.error?.message || 'Invalid response format'}`);
       }
       
+      console.log('✅ OpenAI API response received');
       return data.choices[0].message.content;
     } catch (error) {
       console.error('❌ OpenAI API call failed:', error);
@@ -73,6 +81,9 @@ export class GPTService {
     }
 
     try {
+      console.log('🤖 Calling OpenRouter API...');
+      console.log('🔑 Using API Key:', this.openrouterApiKey.substring(0, 10) + '...');
+      
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -82,7 +93,7 @@ export class GPTService {
           'X-Title': 'FAi-3.0 Trading System'
         },
         body: JSON.stringify({
-          model: process.env.GPT_MODEL || 'openai/gpt-4o',
+          model: process.env.GPT_MODEL || 'openai/gpt-4o-2024-08-06',
           messages: messages,
           temperature: 0.3,
           max_tokens: 500
@@ -91,6 +102,7 @@ export class GPTService {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        console.error('❌ OpenRouter API Error Response:', errorData);
         throw new Error(`OpenRouter API Error (${response.status}): ${errorData.error?.message || response.statusText}`);
       }
 
@@ -101,6 +113,7 @@ export class GPTService {
         throw new Error(`OpenRouter API Error: ${data.error?.message || 'Invalid response format'}`);
       }
       
+      console.log('✅ OpenRouter API response received');
       return data.choices[0].message.content;
     } catch (error) {
       console.error('❌ OpenRouter API call failed:', error);
@@ -207,12 +220,20 @@ Please analyze and provide trading decision.`;
 
   async chatWithGPT(message, context, provider = 'openai') {
     try {
-      if (provider === 'openrouter' && !this.openrouterApiKey) {
-        return 'OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file to use this provider.';
+      console.log(`🤖 Chat request with provider: ${provider}`);
+      
+      if (provider === 'openrouter') {
+        if (!this.openrouterApiKey) {
+          return 'OpenRouter API key not configured. Please set OPENROUTER_API_KEY in your .env file to use this provider.';
+        }
+        console.log('🔑 OpenRouter key available:', this.openrouterApiKey ? 'Yes' : 'No');
       }
       
-      if (provider === 'openai' && !this.openaiApiKey) {
-        return 'OpenAI API key not configured. Please set OPENAI_API_KEY in your .env file to use this provider.';
+      if (provider === 'openai') {
+        if (!this.openaiApiKey) {
+          return 'OpenAI API key not configured. Please set OPENAI_API_KEY in your .env file to use this provider.';
+        }
+        console.log('🔑 OpenAI key available:', this.openaiApiKey ? 'Yes' : 'No');
       }
 
       const messages = [
