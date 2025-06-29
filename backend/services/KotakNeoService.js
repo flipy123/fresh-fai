@@ -471,6 +471,13 @@ export class KotakNeoService extends EventEmitter {
         headers: this.getAuthHeaders()
       });
 
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ Wallet API HTTP ${response.status}: ${response.statusText}`);
+        console.error('❌ Response body:', errorText);
+        throw new Error(`HTTP ${response.status}: ${response.statusText} - ${errorText}`);
+      }
+
       const data = await response.json();
       
       if (data.fault) {
