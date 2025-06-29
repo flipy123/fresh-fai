@@ -285,7 +285,11 @@ export class KotakNeoService extends EventEmitter {
       
       const response = await fetch(`${this.baseUrl}/Files/1.0/masterscrip/v2/file-paths`, {
         method: 'GET',
-        headers: this.getAuthHeaders()
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.oauthAccessToken}`,
+          'accept': '*/*'
+        }
       });
 
       if (!response.ok) {
