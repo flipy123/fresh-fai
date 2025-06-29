@@ -25,13 +25,15 @@ export class KotakNeoService extends EventEmitter {
     this.tradeToken = null;
     this.isLoggedIn = false;
     this.neoFinkey = null;
+    this.oauthAccessToken = null;
   }
 
   async initialize() {
     try {
-      if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD) {
+      if (!process.env.KOTAK_CONSUMER_KEY || !process.env.KOTAK_MOBILE_NUMBER || !process.env.KOTAK_PASSWORD || !process.env.KOTAK_ACCESS_TOKEN) {
         console.log('⚠️ Kotak Neo credentials not configured. Please update your .env file with valid credentials.');
-        console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD, KOTAK_MPIN');
+        console.log('Required: KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD, KOTAK_ACCESS_TOKEN');
+        console.log('💡 Get your ACCESS_TOKEN from the Kotak Neo developer portal OAuth2 section');
         return;
       }
 
@@ -42,13 +44,14 @@ export class KotakNeoService extends EventEmitter {
       this.mpin = process.env.KOTAK_MPIN;
       this.ucc = process.env.KOTAK_UCC;
       this.neoFinkey = process.env.KOTAK_NEO_FINKEY;
+      this.oauthAccessToken = process.env.KOTAK_ACCESS_TOKEN;
 
-      // Ensure mobile number is in correct format (without +91)
-      if (this.mobileNumber.startsWith('+91')) {
-        this.mobileNumber = this.mobileNumber.substring(3);
+      // Ensure mobile number includes country code
+      if (!this.mobileNumber.startsWith('+91')) {
+        this.mobileNumber = '+91' + this.mobileNumber;
       }
 
-      await this.loginWithoutTOTP();
+      await this.loginWithOTP();
       await this.downloadMasterData();
       this.connectWebSocket();
       console.log('✅ Kotak Neo Service initialized successfully');
@@ -58,10 +61,35 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async loginWithoutTOTP() {
+  async loginWithOTP() {
     try {
-      console.log('🔐 Attempting Kotak Neo login without TOTP...');
+      console.log('🔐 Step 1: Attempting Kotak Neo login to get view token...');
       
+      // Step 1: Get View Token
+      const viewToken = await this.getViewToken();
+      if (!viewToken) {
+        throw new Error('Failed to get view token');
+      }
+
+      // Step 2: Generate OTP
+      console.log('📱 Step 2: Generating OTP...');
+      await this.generateOTP();
+
+      // Step 3: Wait for user to provide OTP (for now, we'll try without OTP)
+      console.log('⚠️ OTP-based login requires manual OTP input. Continuing with view token only...');
+      
+      this.accessToken = this.viewToken;
+      this.isLoggedIn = true;
+      console.log('✅ Kotak Neo authentication completed with view token');
+      return true;
+    } catch (error) {
+      console.error('❌ Kotak Neo login failed:', error);
+      throw error;
+    }
+  }
+
+  async getViewToken() {
+    try {
       const loginPayload = {
         mobileNumber: this.mobileNumber,
         password: this.password
@@ -69,14 +97,11 @@ export class KotakNeoService extends EventEmitter {
 
       console.log('📤 Login payload:', { mobileNumber: this.mobileNumber, password: '***' });
 
-      // Create Basic Auth token using consumer key and secret
-      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
-
       const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Basic ${basicAuthToken}`,
+          'Authorization': `Bearer ${this.oauthAccessToken}`,
           'accept': '*/*'
         },
         body: JSON.stringify(loginPayload)
@@ -104,48 +129,43 @@ export class KotakNeoService extends EventEmitter {
         throw new Error(`Login failed: No data in response. Full response: ${JSON.stringify(loginData)}`);
       }
 
-      // Validate required fields in data
-      if (!loginData.data.userId) {
-        console.error('❌ Missing userId in response data:', Object.keys(loginData.data));
-        throw new Error(`Login failed: User ID not found in response data. Available fields: ${Object.keys(loginData.data).join(', ')}`);
-      }
-
       // Extract session details
-      this.userId = loginData.data.userId;
+      this.viewToken = loginData.data.token;
+      this.userId = loginData.data.ucc; // UCC is the user ID in some cases
       this.ucc = loginData.data.ucc || this.ucc;
       this.sid = loginData.data.sid;
       this.rid = loginData.data.rid;
+      this.hsServerId = loginData.data.hsServerId;
 
-      console.log(`✅ Login successful. User ID: ${this.userId}, UCC: ${this.ucc}`);
-
-      // Try to generate session token directly with MPIN
-      if (this.mpin) {
-        console.log('🔑 Attempting to generate session token with MPIN...');
-        await this.generateSessionWithMPIN();
-      } else {
-        console.log('⚠️ MPIN not configured, using basic session');
-        this.accessToken = 'basic_session';
-        this.viewToken = 'basic_session';
+      // Decode JWT token to get actual userId
+      if (this.viewToken) {
+        try {
+          const tokenParts = this.viewToken.split('.');
+          if (tokenParts.length === 3) {
+            const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
+            this.userId = payload.sub || this.userId;
+            console.log('🔍 Decoded user ID from token:', this.userId);
+          }
+        } catch (decodeError) {
+          console.log('⚠️ Could not decode JWT token, using UCC as user ID');
+        }
       }
 
-      this.isLoggedIn = true;
-      console.log('✅ Kotak Neo authentication completed successfully');
-      return true;
+      console.log(`✅ View token obtained. User ID: ${this.userId}, UCC: ${this.ucc}`);
+      return this.viewToken;
     } catch (error) {
-      console.error('❌ Kotak Neo login failed:', error);
+      console.error('❌ Failed to get view token:', error);
       
       // Provide specific guidance based on error type
       if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
         console.log('💡 Authentication failed. Please verify:');
-        console.log('   - KOTAK_CONSUMER_KEY is correct');
-        console.log('   - KOTAK_CONSUMER_SECRET is correct');
-        console.log('   - KOTAK_MOBILE_NUMBER is correct (without +91 prefix)');
+        console.log('   - KOTAK_ACCESS_TOKEN is correct (get from OAuth2 section in developer portal)');
+        console.log('   - KOTAK_MOBILE_NUMBER includes +91 country code');
         console.log('   - KOTAK_PASSWORD is correct');
         console.log('   - Your Kotak Neo account is active and has API access');
       } else if (error.message.includes('HTTP 400') || error.message.includes('Bad Request')) {
         console.log('💡 Bad request. Please verify:');
-        console.log('   - All required fields are provided');
-        console.log('   - Mobile number format is correct (10 digits without +91)');
+        console.log('   - Mobile number format: +919666803027');
         console.log('   - Password does not contain special characters that need encoding');
       }
       
@@ -153,23 +173,77 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async generateSessionWithMPIN() {
+  async generateOTP() {
     try {
-      const sessionPayload = {
+      if (!this.userId) {
+        throw new Error('User ID not available for OTP generation');
+      }
+
+      const otpPayload = {
         userId: this.userId,
-        mpin: this.mpin
+        sendEmail: true,
+        isWhitelisted: true
       };
 
-      console.log('📤 Session payload:', { userId: this.userId, mpin: '***' });
+      console.log('📤 OTP payload:', otpPayload);
 
-      // Create Basic Auth token using consumer key and secret
-      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
-
-      const sessionResponse = await fetch(`${this.baseUrl}/session/1.0/session/2FA/validate`, {
+      const otpResponse = await fetch(`${this.baseUrl}/login/1.0/login/otp/generate`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Basic ${basicAuthToken}`,
+          'Authorization': `Bearer ${this.oauthAccessToken}`,
+          'accept': '*/*'
+        },
+        body: JSON.stringify(otpPayload)
+      });
+
+      const otpData = await otpResponse.json();
+      console.log('📋 OTP response status:', otpResponse.status);
+      console.log('📋 OTP response:', JSON.stringify(otpData, null, 2));
+
+      if (!otpResponse.ok) {
+        console.log(`⚠️ OTP generation failed: HTTP ${otpResponse.status}`);
+        return false;
+      }
+
+      if (otpData.fault) {
+        const errorMessage = otpData.fault.message || otpData.fault.description;
+        console.log(`⚠️ OTP generation failed: ${errorMessage}`);
+        return false;
+      }
+
+      if (otpData.data) {
+        console.log(`📱 OTP sent to: ${otpData.data.mobile} and ${otpData.data.email}`);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('❌ OTP generation failed:', error);
+      return false;
+    }
+  }
+
+  async validateOTPAndGetSessionToken(otp) {
+    try {
+      if (!this.userId || !this.viewToken || !this.sid) {
+        throw new Error('Missing required data for OTP validation');
+      }
+
+      const sessionPayload = {
+        userId: this.userId,
+        otp: otp
+      };
+
+      console.log('📤 Session validation payload:', { userId: this.userId, otp: '***' });
+
+      const sessionResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.oauthAccessToken}`,
+          'sid': this.sid,
+          'Auth': this.viewToken,
           'accept': '*/*'
         },
         body: JSON.stringify(sessionPayload)
@@ -180,40 +254,28 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 Session response:', JSON.stringify(sessionData, null, 2));
 
       if (!sessionResponse.ok) {
-        console.log(`⚠️ Session generation failed: HTTP ${sessionResponse.status}`);
-        console.log('⚠️ Continuing with basic session (market data will work, but trading may be limited)');
-        this.accessToken = 'basic_session';
-        this.viewToken = 'basic_session';
-        return;
+        throw new Error(`Session validation failed: HTTP ${sessionResponse.status}`);
       }
 
       if (sessionData.fault) {
         const errorMessage = sessionData.fault.message || sessionData.fault.description;
-        console.log(`⚠️ Session generation failed: ${errorMessage}`);
-        console.log('⚠️ Continuing with basic session (market data will work, but trading may be limited)');
-        this.accessToken = 'basic_session';
-        this.viewToken = 'basic_session';
-        return;
+        throw new Error(`Session validation failed: ${errorMessage}`);
       }
 
       if (sessionData.data && sessionData.data.token) {
         this.tradeToken = sessionData.data.token;
         this.accessToken = this.tradeToken;
-        this.viewToken = this.tradeToken;
-        this.hsServerId = sessionData.data.hsServerId || '';
         this.sid = sessionData.data.sid || this.sid;
         this.rid = sessionData.data.rid || this.rid;
+        this.hsServerId = sessionData.data.hsServerId || this.hsServerId;
         console.log('✅ Session token generated successfully');
+        return true;
       } else {
-        console.log('⚠️ Session token not found in response, using basic session');
-        this.accessToken = 'basic_session';
-        this.viewToken = 'basic_session';
+        throw new Error('Session token not found in response');
       }
     } catch (error) {
-      console.error('❌ Session generation failed:', error);
-      console.log('⚠️ Continuing with basic session');
-      this.accessToken = 'basic_session';
-      this.viewToken = 'basic_session';
+      console.error('❌ Session validation failed:', error);
+      throw error;
     }
   }
 
@@ -603,12 +665,8 @@ export class KotakNeoService extends EventEmitter {
     // Use trade token for trading operations, view token for market data
     const token = useTradeToken && this.tradeToken ? this.tradeToken : this.accessToken;
     
-    if (token && token !== 'basic_session') {
+    if (token) {
       headers['Authorization'] = `Bearer ${token}`;
-    } else if (this.consumerKey && this.consumerSecret) {
-      // Use Basic Auth with consumer key and secret for authenticated requests
-      const basicAuthToken = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
-      headers['Authorization'] = `Basic ${basicAuthToken}`;
     }
 
     // Add Neo Finkey if available
