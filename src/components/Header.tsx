@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Brain, Wifi, WifiOff, Activity, Key, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react';
+import { Brain, Wifi, WifiOff, Activity, Key, CheckCircle, AlertCircle } from 'lucide-react';
 import { useSocket } from '../contexts/SocketContext';
 import { useTrading } from '../contexts/TradingContext';
 import { useApi } from '../contexts/ApiContext';
@@ -12,7 +12,6 @@ export const Header: React.FC = () => {
   const [gptTimer, setGptTimer] = useState(state.gptInterval);
   const [authStatus, setAuthStatus] = useState<any>(null);
   const [currentMarketData, setCurrentMarketData] = useState<any>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -28,7 +27,6 @@ export const Header: React.FC = () => {
         const response = await api.get('/kotak/auth-status');
         if (response.data.success) {
           setAuthStatus(response.data);
-          console.log('🔐 Auth Status:', response.data);
         }
       } catch (error) {
         console.error('Failed to fetch auth status:', error);
@@ -36,7 +34,7 @@ export const Header: React.FC = () => {
     };
 
     fetchAuthStatus();
-    const interval = setInterval(fetchAuthStatus, 10000); // Check every 10 seconds
+    const interval = setInterval(fetchAuthStatus, 5000);
     return () => clearInterval(interval);
   }, [api]);
 
@@ -54,19 +52,16 @@ export const Header: React.FC = () => {
     };
 
     fetchMarketData();
-    const interval = setInterval(fetchMarketData, 3000); // Fetch every 3 seconds
+    const interval = setInterval(fetchMarketData, 2000);
     return () => clearInterval(interval);
   }, [api, state.selectedIndex]);
 
   useEffect(() => {
     if (marketData) {
       console.log('📊 WebSocket market data received:', marketData);
-      if (marketData.symbol === state.selectedIndex || 
-          (marketData.token && marketData.token.includes(state.selectedIndex))) {
-        setCurrentMarketData(marketData);
-      }
+      setCurrentMarketData(marketData);
     }
-  }, [marketData, state.selectedIndex]);
+  }, [marketData]);
 
   useEffect(() => {
     if (state.isTrading) {
@@ -82,25 +77,6 @@ export const Header: React.FC = () => {
       return () => clearInterval(gptTimerInterval);
     }
   }, [state.isTrading, state.gptInterval]);
-
-  const handleRefreshToken = async () => {
-    setIsRefreshing(true);
-    try {
-      const response = await api.post('/kotak/refresh-token');
-      if (response.data.success) {
-        console.log('✅ Token refreshed successfully');
-        // Refresh auth status
-        const authResponse = await api.get('/kotak/auth-status');
-        if (authResponse.data.success) {
-          setAuthStatus(authResponse.data);
-        }
-      }
-    } catch (error) {
-      console.error('❌ Failed to refresh token:', error);
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
 
   const formatTime = (date: Date) => {
     return date.toLocaleTimeString('en-IN', {
@@ -123,7 +99,7 @@ export const Header: React.FC = () => {
   const getAuthStatusIcon = () => {
     if (!authStatus) return <AlertCircle className="w-5 h-5 text-gray-400" />;
     
-    if (authStatus.canTrade && authStatus.authenticated) {
+    if (authStatus.canTrade) {
       return <CheckCircle className="w-5 h-5 text-green-400" />;
     } else if (authStatus.authenticated) {
       return <Key className="w-5 h-5 text-yellow-400" />;
@@ -135,10 +111,12 @@ export const Header: React.FC = () => {
   const getAuthStatusText = () => {
     if (!authStatus) return 'Checking...';
     
-    if (authStatus.canTrade && authStatus.authenticated) {
-      return 'OAuth2 Connected';
+    if (authStatus.canTrade) {
+      return 'Trading Enabled';
+    } else if (authStatus.otpStatus?.otpRequired) {
+      return 'OTP Required';
     } else if (authStatus.authenticated) {
-      return 'Connected (View Only)';
+      return 'View Only';
     } else {
       return 'Not Connected';
     }
@@ -165,7 +143,7 @@ export const Header: React.FC = () => {
                 <WifiOff className="w-5 h-5 text-red-400" />
               )}
               <span className="text-sm text-gray-300">
-                {connected ? 'WebSocket Connected' : 'WebSocket Disconnected'}
+                {connected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
 
@@ -174,16 +152,6 @@ export const Header: React.FC = () => {
               <span className="text-sm text-gray-300">
                 {getAuthStatusText()}
               </span>
-              {authStatus && !authStatus.authenticated && (
-                <button
-                  onClick={handleRefreshToken}
-                  disabled={isRefreshing}
-                  className="ml-2 p-1 text-blue-400 hover:text-blue-300 disabled:opacity-50"
-                  title="Refresh OAuth2 Token"
-                >
-                  <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-                </button>
-              )}
             </div>
             
             <div className="text-sm text-gray-300">

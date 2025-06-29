@@ -3,9 +3,11 @@ import { Header } from './Header';
 import { ControlPanel } from './ControlPanel';
 import { MainDashboard } from './MainDashboard';
 import { ChatPanel } from './ChatPanel';
+import { OTPModal } from './OTPModal';
 import { useApi } from '../contexts/ApiContext';
 
 export const TradingDashboard: React.FC = () => {
+  const [showOTPModal, setShowOTPModal] = useState(false);
   const [authStatus, setAuthStatus] = useState<any>(null);
   const { api } = useApi();
 
@@ -15,7 +17,11 @@ export const TradingDashboard: React.FC = () => {
         const response = await api.get('/kotak/auth-status');
         if (response.data.success) {
           setAuthStatus(response.data);
-          console.log('🔐 Dashboard Auth Status:', response.data);
+          
+          // Show OTP modal if OTP is required and user can't trade
+          if (response.data.otpStatus?.otpRequired && !response.data.canTrade) {
+            setShowOTPModal(true);
+          }
         }
       } catch (error) {
         console.error('Failed to fetch auth status:', error);
@@ -25,19 +31,25 @@ export const TradingDashboard: React.FC = () => {
     // Check immediately
     checkAuthStatus();
     
-    // Check every 10 seconds
-    const interval = setInterval(checkAuthStatus, 10000);
+    // Check every 3 seconds
+    const interval = setInterval(checkAuthStatus, 3000);
     
     return () => clearInterval(interval);
   }, [api]);
 
-  const handleTestConnection = async () => {
-    try {
-      const response = await api.get('/kotak/test-connection');
-      console.log('🔗 Connection test result:', response.data);
-    } catch (error) {
-      console.error('❌ Connection test failed:', error);
-    }
+  const handleOTPSuccess = () => {
+    setShowOTPModal(false);
+    // Refresh auth status after successful OTP validation
+    setTimeout(async () => {
+      try {
+        const response = await api.get('/kotak/auth-status');
+        if (response.data.success) {
+          setAuthStatus(response.data);
+        }
+      } catch (error) {
+        console.error('Failed to refresh auth status:', error);
+      }
+    }, 1000);
   };
 
   return (
@@ -49,38 +61,25 @@ export const TradingDashboard: React.FC = () => {
         <ChatPanel />
       </div>
       
-      {/* OAuth2 Status Indicator */}
-      {authStatus && (
-        <div className="fixed bottom-4 left-4 z-40">
-          <div className={`px-3 py-2 rounded-lg text-sm ${
-            authStatus.authenticated 
-              ? 'bg-green-600/20 border border-green-600/30 text-green-400'
-              : 'bg-red-600/20 border border-red-600/30 text-red-400'
-          }`}>
-            <div className="flex items-center space-x-2">
-              <div className={`w-2 h-2 rounded-full ${
-                authStatus.authenticated ? 'bg-green-400' : 'bg-red-400'
-              }`}></div>
-              <span>
-                {authStatus.authenticated ? 'OAuth2 Active' : 'OAuth2 Inactive'}
-              </span>
-            </div>
-            <div className="text-xs opacity-75">
-              Method: {authStatus.authMethod || 'OAuth2'}
-            </div>
-          </div>
+      {/* OTP Modal */}
+      <OTPModal
+        isOpen={showOTPModal}
+        onClose={() => setShowOTPModal(false)}
+        onSuccess={handleOTPSuccess}
+      />
+      
+      {/* Manual OTP Trigger Button - for testing */}
+      {authStatus?.otpStatus?.otpRequired && !authStatus.canTrade && (
+        <div className="fixed bottom-4 right-4 z-40">
+          <button
+            onClick={() => setShowOTPModal(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg shadow-lg flex items-center space-x-2"
+          >
+            <span>🔐</span>
+            <span>Enter OTP</span>
+          </button>
         </div>
       )}
-      
-      {/* Test Connection Button - for debugging */}
-      <div className="fixed bottom-4 right-4 z-40">
-        <button
-          onClick={handleTestConnection}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg shadow-lg text-sm"
-        >
-          🔗 Test API
-        </button>
-      </div>
     </div>
   );
 };

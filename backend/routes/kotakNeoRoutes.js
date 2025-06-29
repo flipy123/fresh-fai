@@ -96,54 +96,58 @@ kotakNeoRouter.get('/auth-status', (req, res) => {
     authenticated: isAuthenticated,
     canTrade: canTrade,
     otpStatus: otpStatus,
-    authMethod: 'OAuth2',
     timestamp: new Date().toISOString()
   });
 });
 
-// Refresh access token
-kotakNeoRouter.post('/refresh-token', async (req, res) => {
-  try {
-    await req.kotakService.refreshAccessToken();
-    res.json({ 
-      success: true, 
-      message: 'Access token refreshed successfully' 
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Test connection
-kotakNeoRouter.get('/test-connection', async (req, res) => {
-  try {
-    const isValid = await req.kotakService.validateAccessToken();
-    res.json({ 
-      success: true, 
-      connected: isValid,
-      message: isValid ? 'Connection successful' : 'Connection failed'
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Legacy OTP routes (for compatibility)
+// Validate OTP
 kotakNeoRouter.post('/validate-otp', async (req, res) => {
-  res.status(400).json({ 
-    success: false, 
-    error: 'OTP validation not required for OAuth2 authentication flow' 
-  });
+  try {
+    const { otp } = req.body;
+    
+    if (!otp) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'OTP is required' 
+      });
+    }
+
+    const result = await req.kotakService.validateOTP(otp);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
 });
 
+// Regenerate OTP
 kotakNeoRouter.post('/regenerate-otp', async (req, res) => {
-  res.status(400).json({ 
-    success: false, 
-    error: 'OTP regeneration not required for OAuth2 authentication flow' 
-  });
+  try {
+    const result = await req.kotakService.regenerateOTP();
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
+// Get OTP status
 kotakNeoRouter.get('/otp-status', (req, res) => {
-  const otpStatus = req.kotakService.getOTPStatus();
-  res.json({ success: true, data: otpStatus });
+  try {
+    const otpStatus = req.kotakService.getOTPStatus();
+    res.json({ success: true, data: otpStatus });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Refresh tokens manually
+kotakNeoRouter.post('/refresh-tokens', async (req, res) => {
+  try {
+    await req.kotakService.refreshTokens();
+    res.json({ 
+      success: true, 
+      message: 'Tokens refreshed successfully' 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
