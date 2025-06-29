@@ -26,6 +26,7 @@ export class KotakNeoService extends EventEmitter {
     this.viewToken = null;
     this.tradeToken = null;
     this.isLoggedIn = false;
+    this.neoFinkey = null;
   }
 
   async initialize() {
@@ -42,6 +43,13 @@ export class KotakNeoService extends EventEmitter {
       this.password = process.env.KOTAK_PASSWORD;
       this.mpin = process.env.KOTAK_MPIN;
       this.totpSecret = process.env.KOTAK_TOTP_SECRET;
+      this.ucc = process.env.KOTAK_UCC;
+      this.neoFinkey = process.env.KOTAK_NEO_FINKEY;
+
+      // Remove +91 prefix if present
+      if (this.mobileNumber.startsWith('+91')) {
+        this.mobileNumber = this.mobileNumber.substring(3);
+      }
 
       await this.login();
       await this.downloadMasterData();
@@ -130,17 +138,20 @@ export class KotakNeoService extends EventEmitter {
       if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
         console.log('💡 Authentication failed. Please verify:');
         console.log('   - KOTAK_CONSUMER_KEY is correct');
-        console.log('   - KOTAK_MOBILE_NUMBER is correct');
+        console.log('   - KOTAK_MOBILE_NUMBER is correct (without +91 prefix)');
         console.log('   - KOTAK_PASSWORD is correct');
+        console.log('   - Your Kotak Neo account is active and has API access');
       } else if (error.message.includes('HTTP 400') || error.message.includes('Bad Request')) {
         console.log('💡 Bad request. Please verify:');
         console.log('   - All required fields are provided');
-        console.log('   - Mobile number format is correct (without +91)');
+        console.log('   - Mobile number format is correct (10 digits without +91)');
+        console.log('   - Password does not contain special characters that need encoding');
       } else if (error.message.includes('No data in response')) {
         console.log('💡 API response format issue. This could indicate:');
-        console.log('   - Invalid credentials');
-        console.log('   - API endpoint changes');
+        console.log('   - Invalid credentials or account not activated for API access');
+        console.log('   - API endpoint changes or maintenance');
         console.log('   - Account access restrictions');
+        console.log('   - Need to use actual trading account credentials, not developer portal credentials');
       }
       
       throw error;
@@ -198,6 +209,7 @@ export class KotakNeoService extends EventEmitter {
         console.log('💡 OTP issue. Please verify:');
         console.log('   - KOTAK_TOTP_SECRET is correctly configured');
         console.log('   - TOTP app is synchronized with correct time');
+        console.log('   - OTP generation is working correctly');
       }
       
       throw error;
@@ -669,6 +681,11 @@ export class KotakNeoService extends EventEmitter {
     
     if (this.consumerKey) {
       headers['consumerKey'] = this.consumerKey;
+    }
+
+    // Add Neo Finkey if available
+    if (this.neoFinkey) {
+      headers['neo-fin-key'] = this.neoFinkey;
     }
 
     return headers;
