@@ -11,6 +11,33 @@ export class WebSocketManager extends EventEmitter {
     this.kotakService.on('market_data', (data) => {
       this.broadcastMarketData(data);
     });
+
+    // Listen to data updates (positions, orders, wallet)
+    this.kotakService.on('data_update', (data) => {
+      this.broadcastDataUpdate(data);
+    });
+
+    // Listen to order updates
+    this.kotakService.on('order_update', (data) => {
+      this.broadcastOrderUpdate(data);
+    });
+
+    // Listen to authentication events
+    this.kotakService.on('login_success', (data) => {
+      this.broadcastSystemUpdate({ type: 'login_success', data });
+    });
+
+    this.kotakService.on('otp_required', (data) => {
+      this.broadcastSystemUpdate({ type: 'otp_required', data });
+    });
+
+    this.kotakService.on('otp_regenerated', (data) => {
+      this.broadcastSystemUpdate({ type: 'otp_regenerated', data });
+    });
+
+    this.kotakService.on('websocket_connected', () => {
+      this.broadcastSystemUpdate({ type: 'websocket_connected', data: { message: 'WebSocket connected' } });
+    });
   }
 
   subscribeToData(socket, data) {
@@ -43,6 +70,16 @@ export class WebSocketManager extends EventEmitter {
   broadcastMarketData(marketData) {
     // Broadcast to all connected clients
     this.io.emit('market_data', marketData);
+  }
+
+  broadcastDataUpdate(data) {
+    // Broadcast positions, orders, and wallet updates
+    this.io.emit('data_update', data);
+  }
+
+  broadcastOrderUpdate(data) {
+    // Broadcast order updates
+    this.io.emit('order_update', data);
   }
 
   broadcastToRoom(room, event, data) {

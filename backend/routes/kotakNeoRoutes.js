@@ -43,6 +43,16 @@ kotakNeoRouter.get('/orders', async (req, res) => {
   }
 });
 
+// Get wallet balance
+kotakNeoRouter.get('/wallet', async (req, res) => {
+  try {
+    const wallet = await req.kotakService.getWalletBalance();
+    res.json({ success: true, data: wallet });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Place order
 kotakNeoRouter.post('/orders', async (req, res) => {
   try {

@@ -6,12 +6,14 @@ export class KotakNeoService extends EventEmitter {
   constructor() {
     super();
     this.baseUrl = 'https://gw-napi.kotaksecurities.com';
-    this.wsUrl = 'wss://mlhsi.kotaksecurities.com';
+    this.wsUrl = 'wss://mlhsm.kotaksecurities.com'; // Correct HSM URL
+    this.hsiUrl = 'wss://mis.kotaksecurities.com/realtime'; // HSI URL for orders
     this.accessToken = null;
     this.sid = null;
     this.rid = null;
     this.hsServerId = null;
     this.websocket = null;
+    this.hsiWebsocket = null;
     this.masterData = null;
     this.subscribedTokens = new Set();
     this.userId = null;
@@ -26,6 +28,7 @@ export class KotakNeoService extends EventEmitter {
     this.isLoggedIn = false;
     this.neoFinkey = null;
     this.oauthAccessToken = null;
+    this.dataCenter = 'gdc'; // Default data center
     
     // OTP Management
     this.otpGenerated = false;
@@ -37,6 +40,16 @@ export class KotakNeoService extends EventEmitter {
     
     // Auto-refresh timer
     this.tokenRefreshTimer = null;
+    this.heartbeatInterval = null;
+    this.hsiHeartbeatInterval = null;
+    
+    // Connection retry
+    this.maxRetries = 5;
+    this.retryCount = 0;
+    this.retryDelay = 5000;
+    
+    // Data refresh intervals
+    this.dataRefreshInterval = null;
   }
 
   async initialize() {
@@ -64,8 +77,7 @@ export class KotakNeoService extends EventEmitter {
 
       await this.startLoginProcess();
       await this.downloadMasterData();
-      this.connectWebSocket();
-      this.setupTokenRefreshTimer();
+      this.startDataRefreshInterval();
       console.log('✅ Kotak Neo Service initialized successfully');
     } catch (error) {
       console.error('❌ Failed to initialize Kotak Neo Service:', error.message);
@@ -102,6 +114,7 @@ export class KotakNeoService extends EventEmitter {
         this.accessToken = this.viewToken;
         this.isLoggedIn = true;
         this.tokenGeneratedAt = Date.now();
+        this.connectWebSockets();
       }
 
       return true;
@@ -157,6 +170,7 @@ export class KotakNeoService extends EventEmitter {
       this.sid = loginData.data.sid;
       this.rid = loginData.data.rid;
       this.hsServerId = loginData.data.hsServerId;
+      this.dataCenter = loginData.data.dataCenter || 'gdc';
 
       // Decode JWT token to get actual userId
       if (this.viewToken) {
@@ -172,7 +186,7 @@ export class KotakNeoService extends EventEmitter {
         }
       }
 
-      console.log(`✅ View token obtained. User ID: ${this.userId}, UCC: ${this.ucc}`);
+      console.log(`✅ View token obtained. User ID: ${this.userId}, UCC: ${this.ucc}, Data Center: ${this.dataCenter}`);
       return this.viewToken;
     } catch (error) {
       console.error('❌ Failed to get view token:', error);
@@ -304,6 +318,7 @@ export class KotakNeoService extends EventEmitter {
         this.sid = sessionData.data.sid || this.sid;
         this.rid = sessionData.data.rid || this.rid;
         this.hsServerId = sessionData.data.hsServerId || this.hsServerId;
+        this.dataCenter = sessionData.data.dataCenter || this.dataCenter;
         
         // Reset OTP flags
         this.pendingOTPValidation = false;
@@ -313,6 +328,10 @@ export class KotakNeoService extends EventEmitter {
         this.tokenGeneratedAt = Date.now();
         
         console.log('✅ OTP validated successfully! Trade token generated.');
+        
+        // Connect WebSockets after successful OTP validation
+        this.connectWebSockets();
+        
         this.emit('login_success', {
           message: 'Login completed successfully',
           canTrade: true
@@ -373,58 +392,243 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  setupTokenRefreshTimer() {
-    // Clear existing timer
-    if (this.tokenRefreshTimer) {
-      clearTimeout(this.tokenRefreshTimer);
+  connectWebSockets() {
+    if (!this.sid || !this.accessToken) {
+      console.log('⚠️ Cannot connect WebSocket: Missing SID or token');
+      return;
     }
 
-    // Set timer to refresh token before expiry (refresh 1 hour before expiry)
-    const refreshTime = this.tokenExpiry - (60 * 60 * 1000); // 23 hours
-    
-    this.tokenRefreshTimer = setTimeout(async () => {
+    console.log('🔌 Connecting to WebSockets...');
+    this.connectHSM();
+    this.connectHSI();
+  }
+
+  connectHSM() {
+    if (this.websocket) {
+      this.websocket.close();
+    }
+
+    console.log('🔌 Connecting to HSM WebSocket...');
+    this.websocket = new WebSocket(this.wsUrl);
+
+    this.websocket.on('open', () => {
+      console.log('✅ HSM WebSocket connected');
+      
+      // Send connection message as per demo
+      const connectionMsg = {
+        Authorization: this.accessToken,
+        Sid: this.sid,
+        type: "cn"
+      };
+      
+      this.websocket.send(JSON.stringify(connectionMsg));
+      
+      // Start heartbeat
+      this.heartbeatInterval = setInterval(() => {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+          this.websocket.send(JSON.stringify({type: "ti", scrips: ""}));
+        }
+      }, 30000);
+      
+      this.emit('websocket_connected');
+      this.subscribeToDefaultIndices();
+      this.retryCount = 0;
+    });
+
+    this.websocket.on('message', (data) => {
       try {
-        console.log('🔄 Token expiring soon. Starting refresh process...');
-        await this.refreshTokens();
+        const message = JSON.parse(data.toString());
+        this.handleHSMMessage(message);
       } catch (error) {
-        console.error('❌ Token refresh failed:', error);
-        this.emit('token_refresh_failed', error);
+        console.error('❌ HSM WebSocket message parse error:', error);
       }
-    }, refreshTime);
+    });
 
-    console.log(`⏰ Token refresh scheduled in ${refreshTime / 1000 / 60 / 60} hours`);
+    this.websocket.on('close', (code, reason) => {
+      console.log(`⚠️ HSM WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
+      if (this.heartbeatInterval) {
+        clearInterval(this.heartbeatInterval);
+      }
+      
+      if (this.retryCount < this.maxRetries) {
+        setTimeout(() => {
+          this.retryCount++;
+          this.connectHSM();
+        }, this.retryDelay);
+      }
+    });
+
+    this.websocket.on('error', (error) => {
+      console.error('❌ HSM WebSocket error:', error);
+    });
   }
 
-  async refreshTokens() {
+  connectHSI() {
+    if (this.hsiWebsocket) {
+      this.hsiWebsocket.close();
+    }
+
+    // Determine HSI URL based on data center
+    let hsiUrl = this.hsiUrl;
+    if (this.dataCenter === 'adc') {
+      hsiUrl = 'wss://cis.kotaksecurities.com/realtime';
+    } else if (this.dataCenter === 'e21') {
+      hsiUrl = 'wss://e21.kotaksecurities.com/realtime';
+    } else if (this.dataCenter === 'e22') {
+      hsiUrl = 'wss://e22.kotaksecurities.com/realtime';
+    } else if (this.dataCenter === 'e41') {
+      hsiUrl = 'wss://e41.kotaksecurities.com/realtime';
+    } else if (this.dataCenter === 'e43') {
+      hsiUrl = 'wss://e43.kotaksecurities.com/realtime';
+    }
+
+    console.log(`🔌 Connecting to HSI WebSocket: ${hsiUrl}`);
+    this.hsiWebsocket = new WebSocket(hsiUrl);
+
+    this.hsiWebsocket.on('open', () => {
+      console.log('✅ HSI WebSocket connected');
+      
+      // Send connection message for orders
+      const connectionMsg = {
+        type: "cn",
+        Authorization: this.accessToken,
+        Sid: this.sid,
+        source: "WEB"
+      };
+      
+      this.hsiWebsocket.send(JSON.stringify(connectionMsg));
+      
+      // Start heartbeat for HSI
+      this.hsiHeartbeatInterval = setInterval(() => {
+        if (this.hsiWebsocket && this.hsiWebsocket.readyState === WebSocket.OPEN) {
+          this.hsiWebsocket.send(JSON.stringify({type: "hb"}));
+        }
+      }, 30000);
+    });
+
+    this.hsiWebsocket.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        this.handleHSIMessage(message);
+      } catch (error) {
+        console.error('❌ HSI WebSocket message parse error:', error);
+      }
+    });
+
+    this.hsiWebsocket.on('close', (code, reason) => {
+      console.log(`⚠️ HSI WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
+      if (this.hsiHeartbeatInterval) {
+        clearInterval(this.hsiHeartbeatInterval);
+      }
+    });
+
+    this.hsiWebsocket.on('error', (error) => {
+      console.error('❌ HSI WebSocket error:', error);
+    });
+  }
+
+  subscribeToDefaultIndices() {
     try {
-      console.log('🔄 Refreshing authentication tokens...');
+      // Subscribe to indices using the correct format from demo
+      const indicesSubscription = {
+        type: "ifs",
+        scrips: "nse_cm|Nifty 50&nse_cm|Nifty Bank&nse_cm|Nifty Fin Service&nse_cm|NIFTY MIDCAP 100",
+        channelnum: 1
+      };
       
-      // Start fresh login process
-      this.isLoggedIn = false;
-      this.accessToken = null;
-      this.viewToken = null;
-      this.tradeToken = null;
-      
-      await this.startLoginProcess();
-      
-      console.log('✅ Tokens refreshed successfully');
-      this.emit('tokens_refreshed');
-      
-      return true;
+      if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+        this.websocket.send(JSON.stringify(indicesSubscription));
+        console.log('📡 Subscribed to default indices');
+      }
     } catch (error) {
-      console.error('❌ Token refresh failed:', error);
-      throw error;
+      console.error('❌ Failed to subscribe to default indices:', error);
     }
   }
 
-  getOTPStatus() {
-    return {
-      otpRequired: this.pendingOTPValidation,
-      otpGenerated: this.otpGenerated,
-      otpExpired: this.otpGenerated && (Date.now() - this.otpGeneratedAt > this.otpExpiry),
-      timeRemaining: this.otpGenerated ? Math.max(0, this.otpExpiry - (Date.now() - this.otpGeneratedAt)) : 0,
-      canTrade: this.canTrade()
-    };
+  handleHSMMessage(message) {
+    try {
+      // Handle market data messages
+      if (message.type === 'mf' || message.type === 'sf') {
+        this.emit('market_data', {
+          token: message.tk,
+          ltp: parseFloat(message.lp) || 0,
+          change: parseFloat(message.c) || 0,
+          changePercent: parseFloat(message.cp) || 0,
+          volume: parseInt(message.v) || 0,
+          timestamp: message.ft,
+          high: parseFloat(message.h) || 0,
+          low: parseFloat(message.l) || 0,
+          open: parseFloat(message.o) || 0,
+          close: parseFloat(message.pc) || 0
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error handling HSM message:', error);
+    }
+  }
+
+  handleHSIMessage(message) {
+    try {
+      // Handle order updates and other HSI messages
+      if (message.type === 'order_update') {
+        this.emit('order_update', message);
+      }
+    } catch (error) {
+      console.error('❌ Error handling HSI message:', error);
+    }
+  }
+
+  async subscribeToTokens(tokens) {
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      console.log('⚠️ HSM WebSocket not connected, cannot subscribe to tokens');
+      return;
+    }
+
+    const newTokens = tokens.filter(token => !this.subscribedTokens.has(token));
+    if (newTokens.length === 0) {
+      console.log('📡 All tokens already subscribed');
+      return;
+    }
+
+    try {
+      // Format tokens for subscription
+      const scripsString = newTokens.map(token => `nse_cm|${token}`).join('&');
+      
+      const subscribeMessage = {
+        type: "ifs",
+        scrips: scripsString,
+        channelnum: 1
+      };
+
+      this.websocket.send(JSON.stringify(subscribeMessage));
+      newTokens.forEach(token => this.subscribedTokens.add(token));
+      
+      console.log(`📡 Subscribed to ${newTokens.length} tokens:`, newTokens);
+    } catch (error) {
+      console.error('❌ Failed to subscribe to tokens:', error);
+    }
+  }
+
+  startDataRefreshInterval() {
+    // Refresh positions, orders, and wallet data every 5 seconds
+    this.dataRefreshInterval = setInterval(async () => {
+      try {
+        if (this.isAuthenticated()) {
+          const [positions, orders] = await Promise.all([
+            this.getPositions(),
+            this.getOrders()
+          ]);
+          
+          this.emit('data_update', {
+            positions,
+            orders,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (error) {
+        console.error('❌ Failed to refresh data:', error);
+      }
+    }, 5000);
   }
 
   async downloadMasterData() {
@@ -545,104 +749,6 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  connectWebSocket() {
-    if (!this.sid) {
-      console.log('⚠️ Cannot connect WebSocket: Missing SID');
-      return;
-    }
-
-    if (this.websocket) {
-      this.websocket.close();
-    }
-
-    const wsUrl = `${this.wsUrl}/?sid=${this.sid}${this.hsServerId ? `&hsServerId=${this.hsServerId}` : ''}`;
-    console.log('🔌 Connecting to WebSocket:', wsUrl);
-
-    this.websocket = new WebSocket(wsUrl);
-
-    this.websocket.on('open', () => {
-      console.log('✅ WebSocket connected to Kotak Neo');
-      this.emit('websocket_connected');
-      this.subscribeToDefaultIndices();
-    });
-
-    this.websocket.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        this.handleWebSocketMessage(message);
-      } catch (error) {
-        console.error('❌ WebSocket message parse error:', error);
-      }
-    });
-
-    this.websocket.on('close', (code, reason) => {
-      console.log(`⚠️ WebSocket disconnected from Kotak Neo. Code: ${code}, Reason: ${reason}`);
-      setTimeout(() => this.connectWebSocket(), 5000);
-    });
-
-    this.websocket.on('error', (error) => {
-      console.error('❌ WebSocket error:', error);
-    });
-  }
-
-  subscribeToDefaultIndices() {
-    try {
-      const defaultTokens = ['Nifty 50', 'Nifty Bank', 'Nifty Fin Service', 'NIFTY MIDCAP 100'];
-      this.subscribeToTokens(defaultTokens);
-    } catch (error) {
-      console.error('❌ Failed to subscribe to default indices:', error);
-    }
-  }
-
-  handleWebSocketMessage(message) {
-    try {
-      if (message.type === 'mf' || message.type === 'sf') {
-        this.emit('market_data', {
-          token: message.tk,
-          ltp: parseFloat(message.lp) || 0,
-          change: parseFloat(message.c) || 0,
-          changePercent: parseFloat(message.cp) || 0,
-          volume: parseInt(message.v) || 0,
-          timestamp: message.ft,
-          high: parseFloat(message.h) || 0,
-          low: parseFloat(message.l) || 0,
-          open: parseFloat(message.o) || 0,
-          close: parseFloat(message.pc) || 0
-        });
-      }
-    } catch (error) {
-      console.error('❌ Error handling WebSocket message:', error);
-    }
-  }
-
-  async subscribeToTokens(tokens) {
-    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
-      console.log('⚠️ WebSocket not connected, cannot subscribe to tokens');
-      return;
-    }
-
-    const newTokens = tokens.filter(token => !this.subscribedTokens.has(token));
-    if (newTokens.length === 0) {
-      console.log('📡 All tokens already subscribed');
-      return;
-    }
-
-    try {
-      const subscribeMessage = {
-        a: 'subscribe',
-        v: newTokens,
-        m: 'mf'
-      };
-
-      this.websocket.send(JSON.stringify(subscribeMessage));
-      newTokens.forEach(token => this.subscribedTokens.add(token));
-      
-      console.log(`📡 Subscribed to ${newTokens.length} tokens:`, newTokens);
-    } catch (error) {
-      console.error('❌ Failed to subscribe to tokens:', error);
-    }
-  }
-
   async getOptionChain(symbol, expiryDate) {
     try {
       const instrumentToken = this.getInstrumentToken(symbol);
@@ -714,6 +820,32 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
+  async getWalletBalance() {
+    try {
+      const response = await fetch(`${this.baseUrl}/Limits/1.0/limits`, {
+        method: 'GET',
+        headers: this.getAuthHeaders()
+      });
+
+      const data = await response.json();
+      
+      if (data.fault) {
+        console.error('❌ Wallet API error:', data.fault.message || data.fault.description);
+        return { available: 0, used: 0, total: 0 };
+      }
+      
+      const limits = data.data || {};
+      return {
+        available: parseFloat(limits.availableMargin || 0),
+        used: parseFloat(limits.usedMargin || 0),
+        total: parseFloat(limits.totalMargin || 0)
+      };
+    } catch (error) {
+      console.error('❌ Failed to get wallet balance:', error);
+      return { available: 0, used: 0, total: 0 };
+    }
+  }
+
   async placeOrder(orderDetails) {
     try {
       if (!this.tradeToken) {
@@ -777,6 +909,60 @@ export class KotakNeoService extends EventEmitter {
     }
 
     return headers;
+  }
+
+  setupTokenRefreshTimer() {
+    // Clear existing timer
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+    }
+
+    // Set timer to refresh token before expiry (refresh 1 hour before expiry)
+    const refreshTime = this.tokenExpiry - (60 * 60 * 1000); // 23 hours
+    
+    this.tokenRefreshTimer = setTimeout(async () => {
+      try {
+        console.log('🔄 Token expiring soon. Starting refresh process...');
+        await this.refreshTokens();
+      } catch (error) {
+        console.error('❌ Token refresh failed:', error);
+        this.emit('token_refresh_failed', error);
+      }
+    }, refreshTime);
+
+    console.log(`⏰ Token refresh scheduled in ${refreshTime / 1000 / 60 / 60} hours`);
+  }
+
+  async refreshTokens() {
+    try {
+      console.log('🔄 Refreshing authentication tokens...');
+      
+      // Start fresh login process
+      this.isLoggedIn = false;
+      this.accessToken = null;
+      this.viewToken = null;
+      this.tradeToken = null;
+      
+      await this.startLoginProcess();
+      
+      console.log('✅ Tokens refreshed successfully');
+      this.emit('tokens_refreshed');
+      
+      return true;
+    } catch (error) {
+      console.error('❌ Token refresh failed:', error);
+      throw error;
+    }
+  }
+
+  getOTPStatus() {
+    return {
+      otpRequired: this.pendingOTPValidation,
+      otpGenerated: this.otpGenerated,
+      otpExpired: this.otpGenerated && (Date.now() - this.otpGeneratedAt > this.otpExpiry),
+      timeRemaining: this.otpGenerated ? Math.max(0, this.otpExpiry - (Date.now() - this.otpGeneratedAt)) : 0,
+      canTrade: this.canTrade()
+    };
   }
 
   getInstrumentToken(symbol) {
@@ -856,8 +1042,20 @@ export class KotakNeoService extends EventEmitter {
     if (this.tokenRefreshTimer) {
       clearTimeout(this.tokenRefreshTimer);
     }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+    if (this.hsiHeartbeatInterval) {
+      clearInterval(this.hsiHeartbeatInterval);
+    }
+    if (this.dataRefreshInterval) {
+      clearInterval(this.dataRefreshInterval);
+    }
     if (this.websocket) {
       this.websocket.close();
+    }
+    if (this.hsiWebsocket) {
+      this.hsiWebsocket.close();
     }
   }
 }

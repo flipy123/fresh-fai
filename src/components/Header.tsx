@@ -171,7 +171,10 @@ export const Header: React.FC = () => {
           <div className="text-center">
             <div className="text-sm text-gray-400">Wallet</div>
             <div className="text-xl font-bold text-white">
-              ₹{state.wallet.toLocaleString('en-IN')}
+              ₹{state.wallet.available.toLocaleString('en-IN')}
+            </div>
+            <div className="text-xs text-gray-500">
+              Total: ₹{state.wallet.total.toLocaleString('en-IN')}
             </div>
           </div>
         </div>
