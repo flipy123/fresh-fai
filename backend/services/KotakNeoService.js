@@ -638,66 +638,99 @@ export class KotakNeoService extends EventEmitter {
     }
   }
 
-  async downloadAndParseMasterFile(fileUrl) {
-    try {
-      console.log(`📥 Downloading: ${fileUrl}`);
-      const response = await fetch(fileUrl);
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const csvData = await response.text();
-      
-      const lines = csvData.split('\n').filter(line => line.trim());
-      if (lines.length === 0) {
-        console.log('⚠️ Empty CSV file');
-        return;
-      }
-      
-      const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-      
-      const instruments = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i].trim()) {
-          const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
-          const instrument = {};
-          
-          headers.forEach((header, index) => {
-            instrument[header] = values[index] || '';
-          });
-          
-          if (instrument.pSymbolName && (
-            instrument.pSymbolName.includes('NIFTY') || 
-            instrument.pSymbolName.includes('BANKNIFTY') ||
-            instrument.pSymbolName.includes('FINNIFTY') ||
-            instrument.pSymbolName.includes('MIDCPNIFTY') ||
-            instrument.pInstrumentName === 'INDEX' ||
-            instrument.pInstrumentName === 'OPTIDX'
-          )) {
-            if (instrument.dStrikePrice) {
-              instrument.strikePrice = parseFloat(instrument.dStrikePrice) / 100;
-            }
+  async downloadAndParseMasterFile(fileUrl, maxRetries = 3, retryDelay = 2000) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`📥 Downloading: ${fileUrl} (Attempt ${attempt}/${maxRetries})`);
+        
+        const response = await fetch(fileUrl, {
+          timeout: 30000, // 30 second timeout
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/csv,*/*',
+            'Connection': 'keep-alive'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const csvData = await response.text();
+        
+        if (!csvData || csvData.trim().length === 0) {
+          throw new Error('Empty CSV file received');
+        }
+        
+        const lines = csvData.split('\n').filter(line => line.trim());
+        if (lines.length === 0) {
+          console.log('⚠️ Empty CSV file');
+          return;
+        }
+        
+        const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+        
+        const instruments = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i].trim()) {
+            const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
+            const instrument = {};
             
-            if (instrument.lExpiryDate && fileUrl.includes('nse_fo')) {
-              const epochTime = parseInt(instrument.lExpiryDate) + 315513000;
-              instrument.expiryDate = new Date(epochTime * 1000);
-            }
+            headers.forEach((header, index) => {
+              instrument[header] = values[index] || '';
+            });
             
-            instruments.push(instrument);
+            if (instrument.pSymbolName && (
+              instrument.pSymbolName.includes('NIFTY') || 
+              instrument.pSymbolName.includes('BANKNIFTY') ||
+              instrument.pSymbolName.includes('FINNIFTY') ||
+              instrument.pSymbolName.includes('MIDCPNIFTY') ||
+              instrument.pInstrumentName === 'INDEX' ||
+              instrument.pInstrumentName === 'OPTIDX'
+            )) {
+              if (instrument.dStrikePrice) {
+                instrument.strikePrice = parseFloat(instrument.dStrikePrice) / 100;
+              }
+              
+              if (instrument.lExpiryDate && fileUrl.includes('nse_fo')) {
+                const epochTime = parseInt(instrument.lExpiryDate) + 315513000;
+                instrument.expiryDate = new Date(epochTime * 1000);
+              }
+              
+              instruments.push(instrument);
+            }
           }
         }
+        
+        if (!this.masterData) {
+          this.masterData = [];
+        }
+        this.masterData = this.masterData.concat(instruments);
+        
+        console.log(`📊 Successfully parsed ${instruments.length} relevant instruments from ${fileUrl}`);
+        return; // Success, exit retry loop
+        
+      } catch (error) {
+        lastError = error;
+        console.error(`❌ Attempt ${attempt} failed for ${fileUrl}:`, error.message);
+        
+        // If this is not the last attempt, wait before retrying
+        if (attempt < maxRetries) {
+          console.log(`⏳ Waiting ${retryDelay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          // Increase delay for next attempt (exponential backoff)
+          retryDelay *= 1.5;
+        }
       }
-      
-      if (!this.masterData) {
-        this.masterData = [];
-      }
-      this.masterData = this.masterData.concat(instruments);
-      
-      console.log(`📊 Parsed ${instruments.length} relevant instruments from ${fileUrl}`);
-    } catch (error) {
-      console.error('❌ Failed to download/parse master file:', error);
     }
+    
+    // If we get here, all retries failed
+    console.error(`❌ Failed to download ${fileUrl} after ${maxRetries} attempts. Last error:`, lastError.message);
+    
+    // Don't throw the error, just log it and continue with other files
+    // This prevents the entire master data download from failing due to one file
   }
 
   async getOptionChain(symbol, expiryDate) {
