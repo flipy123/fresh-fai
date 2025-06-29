@@ -63,6 +63,8 @@ export class KotakNeoService extends EventEmitter {
         password: this.password
       };
 
+      console.log('📤 Login payload:', { mobileNumber: this.mobileNumber, password: '***' });
+
       const loginResponse = await fetch(`${this.baseUrl}/login/1.0/login/v2/validate`, {
         method: 'POST',
         headers: { 
@@ -75,14 +77,31 @@ export class KotakNeoService extends EventEmitter {
 
       const loginData = await loginResponse.json();
       console.log('📋 Login response status:', loginResponse.status);
+      console.log('📋 Login response headers:', Object.fromEntries(loginResponse.headers.entries()));
       console.log('📋 Login response:', JSON.stringify(loginData, null, 2));
 
-      if (loginData.fault) {
-        throw new Error(`Login failed: ${loginData.fault.message || loginData.fault.description || 'Authentication failed'}`);
+      // Check for HTTP errors first
+      if (!loginResponse.ok) {
+        throw new Error(`HTTP ${loginResponse.status}: ${loginResponse.statusText}. Response: ${JSON.stringify(loginData)}`);
       }
 
+      // Check for API fault errors
+      if (loginData.fault) {
+        const errorMessage = loginData.fault.message || loginData.fault.description || 'Authentication failed';
+        const errorCode = loginData.fault.code || 'UNKNOWN';
+        throw new Error(`Login failed [${errorCode}]: ${errorMessage}`);
+      }
+
+      // Check for missing data field
       if (!loginData.data) {
-        throw new Error('Login failed: No data in response');
+        console.error('❌ Login response structure:', Object.keys(loginData));
+        throw new Error(`Login failed: No data in response. Full response: ${JSON.stringify(loginData)}`);
+      }
+
+      // Validate required fields in data
+      if (!loginData.data.userId) {
+        console.error('❌ Missing userId in response data:', Object.keys(loginData.data));
+        throw new Error(`Login failed: User ID not found in response data. Available fields: ${Object.keys(loginData.data).join(', ')}`);
       }
 
       // Extract session details
@@ -90,10 +109,6 @@ export class KotakNeoService extends EventEmitter {
       this.ucc = loginData.data.ucc;
       this.sid = loginData.data.sid;
       this.rid = loginData.data.rid;
-
-      if (!this.userId) {
-        throw new Error('User ID not found in login response');
-      }
 
       console.log(`✅ Login successful. User ID: ${this.userId}, UCC: ${this.ucc}`);
 
@@ -110,6 +125,24 @@ export class KotakNeoService extends EventEmitter {
       return true;
     } catch (error) {
       console.error('❌ Kotak Neo login failed:', error);
+      
+      // Provide specific guidance based on error type
+      if (error.message.includes('HTTP 401') || error.message.includes('Unauthorized')) {
+        console.log('💡 Authentication failed. Please verify:');
+        console.log('   - KOTAK_CONSUMER_KEY is correct');
+        console.log('   - KOTAK_MOBILE_NUMBER is correct');
+        console.log('   - KOTAK_PASSWORD is correct');
+      } else if (error.message.includes('HTTP 400') || error.message.includes('Bad Request')) {
+        console.log('💡 Bad request. Please verify:');
+        console.log('   - All required fields are provided');
+        console.log('   - Mobile number format is correct (without +91)');
+      } else if (error.message.includes('No data in response')) {
+        console.log('💡 API response format issue. This could indicate:');
+        console.log('   - Invalid credentials');
+        console.log('   - API endpoint changes');
+        console.log('   - Account access restrictions');
+      }
+      
       throw error;
     }
   }
@@ -122,6 +155,8 @@ export class KotakNeoService extends EventEmitter {
         userId: this.userId,
         otp: otp
       };
+
+      console.log('📤 View token payload:', { userId: this.userId, otp: '***' });
 
       const viewTokenResponse = await fetch(`${this.baseUrl}/session/1.0/session/validate`, {
         method: 'POST',
@@ -137,8 +172,14 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 View token response status:', viewTokenResponse.status);
       console.log('📋 View token response:', JSON.stringify(viewTokenData, null, 2));
 
+      if (!viewTokenResponse.ok) {
+        throw new Error(`HTTP ${viewTokenResponse.status}: ${viewTokenResponse.statusText}. Response: ${JSON.stringify(viewTokenData)}`);
+      }
+
       if (viewTokenData.fault) {
-        throw new Error(`View token generation failed: ${viewTokenData.fault.message || viewTokenData.fault.description}`);
+        const errorMessage = viewTokenData.fault.message || viewTokenData.fault.description;
+        const errorCode = viewTokenData.fault.code || 'UNKNOWN';
+        throw new Error(`View token generation failed [${errorCode}]: ${errorMessage}`);
       }
 
       if (viewTokenData.data && viewTokenData.data.token) {
@@ -148,10 +189,17 @@ export class KotakNeoService extends EventEmitter {
         this.rid = viewTokenData.data.rid || this.rid;
         console.log('✅ View token generated successfully');
       } else {
-        throw new Error('View token not found in response');
+        throw new Error(`View token not found in response. Available fields: ${Object.keys(viewTokenData.data || {}).join(', ')}`);
       }
     } catch (error) {
       console.error('❌ View token generation failed:', error);
+      
+      if (error.message.includes('Invalid OTP') || error.message.includes('OTP')) {
+        console.log('💡 OTP issue. Please verify:');
+        console.log('   - KOTAK_TOTP_SECRET is correctly configured');
+        console.log('   - TOTP app is synchronized with correct time');
+      }
+      
       throw error;
     }
   }
@@ -171,6 +219,8 @@ export class KotakNeoService extends EventEmitter {
         mpin: this.mpin
       };
 
+      console.log('📤 Trade token payload:', { userId: this.userId, otp: '***', mpin: '***' });
+
       const tradeTokenResponse = await fetch(`${this.baseUrl}/session/1.0/session/2FA/validate`, {
         method: 'POST',
         headers: { 
@@ -186,7 +236,8 @@ export class KotakNeoService extends EventEmitter {
       console.log('📋 Trade token response:', JSON.stringify(tradeTokenData, null, 2));
 
       if (tradeTokenData.fault) {
-        console.log(`⚠️ Trade token generation failed: ${tradeTokenData.fault.message || tradeTokenData.fault.description}`);
+        const errorMessage = tradeTokenData.fault.message || tradeTokenData.fault.description;
+        console.log(`⚠️ Trade token generation failed: ${errorMessage}`);
         console.log('⚠️ Continuing with view token only (market data will work, but trading will be disabled)');
         return;
       }
